@@ -756,8 +756,7 @@ namespace SCANsat.SCAN_Map
 				SCANcontroller.controller.loadOnDemandScaledSpace(body, mSource);
 			}
 
-			// The readable ScaledSpace copy is only consumed by the Visual map mode and is
-			// very large under RSS (4K-8K bodies); load it lazily and only for that mode.
+			// Visual textures are registered per body and loaded lazily at the needed mip; only for that mode.
 			refreshVisualMapTexture();
 
 			data = SCANUtil.getData(body);
@@ -990,6 +989,13 @@ namespace SCANsat.SCAN_Map
 
 		#region Big Map Texture Generator
 
+		// Pixels this map needs across 360 degrees of longitude at its current scale - what the Visual
+		// source has to cover: the big map's width, or the zoom map's scale times 360.
+		private int visualTargetWidth()
+		{
+			return Mathf.Max(1, Mathf.CeilToInt((float)(mapscale * 360.0)));
+		}
+
 		// True when the GPU compositor is expected to render this map, so the readable CPU copy
 		// can be skipped. Mirrors tryRenderVisualGPU's eligibility: Visual mode, resource overlay
 		// off, composite shader present, and the body's ScaledSpace source textures ready.
@@ -999,7 +1005,7 @@ namespace SCANsat.SCAN_Map
 				return false;
 			switch (m)
 			{
-				case mapType.Visual: return SCAN_Settings_Config.Instance.VisibleMapsActive && SCANcontroller.controller.getScaledSpaceSource(body, out _, out _, out _, out _);   // the setting disables Visual maps outright (the CPU path only honoured it by accident)
+				case mapType.Visual: return SCAN_Settings_Config.Instance.VisibleMapsActive && SCANcontroller.controller.getVisualSource(body, visualTargetWidth(), out _, out _, out _, out _);   // the setting disables Visual maps outright (the CPU path only honoured it by accident)
 				// Altimetry/Slope/Biome need the filled CPU caches (big_heightmap / biome_indexmap),
 				// which only the cache=true map (BigMap, via setWidth) allocates + fills. ZoomMap/RPM
 				// (cache=false, setSize) keep the CPU path for these modes; Visual GPU still works there.
@@ -1010,8 +1016,8 @@ namespace SCANsat.SCAN_Map
 			}
 		}
 
-		// Renders the Visual map on the GPU, sampling the body's ORIGINAL ScaledSpace textures so
-		// no readable CPU copy is needed (that copy is the RSS RAM hog). Returns false (CPU
+		// Renders the Visual map on the GPU from the body's Visual source (cfg-declared files at a
+		// fitting mip, or its resident ScaledSpace textures) - no readable CPU copy anywhere. Returns false (CPU
 		// fallback) when not eligible - see willRenderGPU.
 		private bool tryRenderGPU()
 		{
@@ -1021,7 +1027,7 @@ namespace SCANsat.SCAN_Map
 			Shader shader = SCAN_UI_Loader.VisualCompositeShader;
 
 			// (source material / useMaterial flag are for a later gas-giant/Parallax pass)
-			SCANcontroller.controller.getScaledSpaceSource(body, out Texture colorTex, out Texture normalTex, out _, out _);
+			SCANcontroller.controller.getVisualSource(body, visualTargetWidth(), out Texture colorTex, out Texture normalTex, out int normalYChannel, out _);
 
 			if (compositeMaterial == null || compositeMaterial.shader != shader)
 				compositeMaterial = new Material(shader);
@@ -1057,6 +1063,7 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetFloat("_FlipY", 0f);
 			compositeMaterial.SetFloat("_ColorMode", colorMap ? 1f : 0f);
 			compositeMaterial.SetFloat("_HasNormal", normalTex != null ? 1f : 0f);
+			compositeMaterial.SetFloat("_NormalYChannel", normalYChannel);
 			compositeMaterial.SetFloat("_Terminator", terminator ? 1f : 0f);
 			compositeMaterial.SetFloat("_SunLonCenter", (float)sunLonCenter);
 			compositeMaterial.SetFloat("_SunLatCenter", (float)sunLatCenter);

@@ -23,6 +23,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 	{
 		_ScaledColor ("Scaled Color", 2D) = "gray" {}
 		_ScaledNormal ("Scaled Normal", 2D) = "bump" {}
+		_NormalYChannel ("Normal Y channel (0 = blue, 1 = green)", Float) = 0
 		_CoverageFlags ("Coverage Flags", 2D) = "black" {}
 		_ElevationTex ("Elevation", 2D) = "black" {}
 		_BiomeIndexTex ("Biome Index", 2D) = "black" {}
@@ -72,6 +73,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 			// Visual layer
 			float _ColorMode;       // 1 colour, 0 grayscale
 			float _HasNormal;       // 1 if a normal map is bound
+			float _NormalYChannel;  // 1: Y in green (DXT5nm, BC5); 0: Y in blue (uncompressed RGB normals)
 
 			// Altimetry / Slope
 			float _TerrainMin;      // LUT domain min (metres)
@@ -225,7 +227,14 @@ Shader "Hidden/SCANsat/VisualComposite"
 				return float3(hue2rgb(p, q, hsl.x + 1.0 / 3.0), hue2rgb(p, q, hsl.x), hue2rgb(p, q, hsl.x - 1.0 / 3.0));
 			}
 
-			// SCANmap.cs ~1205-1237: modulate lightness by the normal map's blue channel.
+			// Which channel of the normal map holds Y depends on its format (DXT5nm and BC5 keep it in
+			// green, uncompressed RGB in blue); SCANtextures decides and passes _NormalYChannel.
+			float normalY(float4 n)
+			{
+				return _NormalYChannel > 0.5 ? n.g : n.b;
+			}
+
+			// Modulate lightness by the normal map's Y channel (the CPU renderer used to do this per pixel).
 			float3 normalSoftLight(float3 rgb, float lumOver)
 			{
 				float3 hsl = rgb2hsl(rgb);
@@ -346,7 +355,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 						if (_ColorMode > 0.5)
 						{
 							if (_HasNormal > 0.5)
-								col.rgb = normalSoftLight(col.rgb, tex2D(_ScaledNormal, float2(fLon, fLat)).b);
+								col.rgb = normalSoftLight(col.rgb, normalY(tex2D(_ScaledNormal, float2(fLon, fLat))));
 						}
 						else
 						{
