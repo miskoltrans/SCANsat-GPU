@@ -710,6 +710,7 @@ namespace SCANsat.SCAN_Map
 		private Color32[] coverageFlagsBuf;   // reused CPU buffer for coverageFlags (no per-frame alloc)
 		private bool coverageFlagsDirty = true;   // set each resetMap; rebuild the coverage texture once per pass, not per sweep row
 		private bool gpuRendered;
+		private bool visualFallbackLogged;   // one "no GPU Visual source" log per map pass
 			// GPU data textures for the non-Visual modes (all-modes port). Elevation/biome/resource
 			// upload from the CPU caches (big_heightmap / biome_indexmap / resourceCache); a 1-D palette
 			// LUT baked from heightToColor colourizes altimetry (legend parity). Shader branches _MapMode.
@@ -787,23 +788,26 @@ namespace SCANsat.SCAN_Map
 		}
 
 		/// <summary>
-		/// The readable ScaledSpace color/normal copies (SCANcontroller.readableScaledSpaceMaps)
-		/// are only sampled by the Visual map mode. Load them when this map is in Visual mode and
-		/// release them otherwise, so Altimetry/Slope/Biome maps never pay the cost - which under
-		/// RSS is hundreds of MB per body.
+		/// Visual mode's texture sources are per-body (SCANcontroller.mapTextureHandler): the
+		/// SCANSAT_BODY_TEXTURES paths and the GPU textures loaded from them. Register the body while
+		/// this map is in Visual mode and release it otherwise, so nothing is held for maps that never
+		/// show Visual.
 		/// </summary>
 		private void refreshVisualMapTexture()
 		{
-			if (body == null || SCANcontroller.controller == null)
+			if (SCANcontroller.controller == null || body == null)
+			{
 				return;
+			}
 
-			// The readable copy is only needed by the CPU Visual renderer. Skip it when the GPU
-			// compositor will handle this map (shader present, resource overlay off, source ready);
-			// otherwise load it so the CPU path always has its input.
-			if (mType == mapType.Visual && !willRenderGPU(mapType.Visual))
+			if (mType == mapType.Visual)
+			{
 				SCANcontroller.controller.LoadVisualMapTexture_Renamed(body, mSource);
+			}
 			else
+			{
 				SCANcontroller.controller.UnloadVisualMapTexture(body, mSource);
+			}
 		}
 
 		public void setCustomRange(float min, float max, float rMin, float rMax)
@@ -842,6 +846,7 @@ namespace SCANsat.SCAN_Map
 			resourceTexReady = false;
 			resourceCacheReady = false;
 			coverageFlagsDirty = true;   // new pass: refresh the GPU coverage stencil once from live coverage
+			visualFallbackLogged = false;
 			resourceActive = resourceOn;
 			if (SCANconfigLoader.GlobalResource && setRes)
 			{ //Make sure that a resource is initialized if necessary
@@ -1466,9 +1471,6 @@ namespace SCANsat.SCAN_Map
 				}
 			}
 
-			Texture2D readableScaledSpaceMap = SCANcontroller.controller.getVisualMapTexture(body);
-			Texture2D readableScaledSpaceNormalMap = SCANcontroller.controller.getVisualMapNormalTexture(body);
-
 			// The CPU path only needs biomeIndex when drawing biome borders (it colourises from
 			// stockBiomeColor); the GPU path colourises stock biomes from _BiomeLUT[biomeIndex], so
 			// it needs biomeIndex filled every pixel regardless of the border toggle. Without this
@@ -1790,39 +1792,20 @@ namespace SCANsat.SCAN_Map
 							break;
 						}
 					case mapType.Visual:
-					{
-						if (!SCANcontroller.controller.isVisualTextureLoaded(body))
 						{
-							baseColor = palette.lerp(palette.Black, palette.White, UnityEngine.Random.value);
+							// Visual is GPU-only (tryRenderGPU). Reaching the CPU loop in Visual mode means
+							// there is no eligible source right now (see willRenderGPU): shader missing or
+							// unsupported, or no texture for this body. Draw unscanned rather than guess,
+							// and say so once per pass.
+							if (!visualFallbackLogged)
+							{
+								visualFallbackLogged = true;
+								SCANUtil.SCANlog("[{0}] Visual map has no GPU source (shader unavailable or no texture) - drawing unscanned", body.bodyName);
+							}
+
+							baseColor = unscanned;
 							break;
 						}
-
-						bool highResCovered = SCANUtil.isCovered(lon, lat, data, SCANtype.VisualHiRes);
-						bool lowResCovered = SCANUtil.isCovered(lon, lat, data, SCANtype.VisualLoRes);
-
-						if (highResCovered || lowResCovered)
-						{
-							if (!highResCovered)
-							{
-								// Scale data to create a 512 x 256 map of blocky, low-res pixels
-								lon = Mathf.RoundToInt((float)lon * 512) / 512;
-								lat = Mathf.RoundToInt((float)lat * 256) / 256;
-							}
-
-							baseColor = SCANcontroller.controller.GetShadedVisualPixel(body, lon, lat);
-
-							if (!colorMap || !highResCovered)
-							{
-								baseColor = palette.ConvertToGrayscale(baseColor);
-							}
-						}
-						else
-						{
-							baseColor = unscanned;
-						}
-
-						break;
-					}
 				}
 
 				if (resourceOn)

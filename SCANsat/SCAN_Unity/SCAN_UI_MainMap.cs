@@ -986,33 +986,7 @@ namespace SCANsat.SCAN_Unity
 					break;
 
 				case MainMapDisplayMode.Visual:
-
-					if (!SCANcontroller.controller.isVisualTextureLoaded(data.Body))
-					{
-						c = palette.lerp(palette.black, palette.white, UnityEngine.Random.value);
-						break;
-					}
-
-					bool highResCovered = SCANUtil.isCovered(ilon, scanline, data, SCANtype.VisualHiRes);
-					bool lowResCovered = SCANUtil.isCovered(ilon, scanline, data, SCANtype.VisualLoRes);
-
-					if (highResCovered || lowResCovered)
-					{
-						double lat = scanline - 90;
-						double lon = ilon - 180;
-
-						if (highResCovered || lowResCovered)
-						{
-							c = SCANcontroller.controller.GetShadedVisualPixel(data.Body, lon, lat);
-
-							if (!highResCovered)
-							{
-								c = palette.ConvertToGrayscale(c);  // Default to grayscale for low res
-							}
-						}
-
-						return c;
-					}
+					// Visual is drawn by the GPU compositor (main-map port in the following commit); nothing for the CPU path to draw.
 					break;
 			}
 

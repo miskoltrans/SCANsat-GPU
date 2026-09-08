@@ -150,11 +150,6 @@ namespace SCANsat
 		public Vector2 OverlayPosition = new Vector2(600, -200);
 		[Persistent]
 		public bool VisibleMapsActive = true;
-		// Max width (px) of the readable ScaledSpace copy used by the Visual map mode. The map is
-		// never wider than 1440px and is sampled bilinearly, so native RSS 4K-8K textures are pure
-		// waste; the copy is downsampled to this cap (height = width/2). Lower = less RAM.
-		[Persistent]
-		public int VisibleMapMaxResolution = 2048;
 
 		private const string filePath = "GameData/SCANsat/PluginData/Settings.cfg";
 		private const string directoryPath = "GameData/SCANsat/PluginData";
