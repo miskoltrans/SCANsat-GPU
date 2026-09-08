@@ -34,6 +34,8 @@ namespace SCANsat.SCAN_Unity
 		private SCANdata data;
 		private SCANtype sensors;
 		private Texture2D map_small;
+		private SCANmap visualMap;      // Visual mode: GPU-composited (see pumpVisualMap)
+		private Texture shownTexture;   // what the RawImage currently points at
 		private Color32[] cols_height_map_small;
 		private Color32[] biomeCache;
 		private bool biomeBuilding;
@@ -98,6 +100,8 @@ namespace SCANsat.SCAN_Unity
 				map_small = null;
 			}
 
+			destroyVisualMap();
+
 			GameEvents.onVesselSOIChanged.Remove(soiChange);
 			GameEvents.onVesselChange.Remove(vesselChange);
 			GameEvents.onVesselWasModified.Remove(vesselChange);
@@ -108,7 +112,6 @@ namespace SCANsat.SCAN_Unity
 			v = FlightGlobals.ActiveVessel;
 
 			data = SCANUtil.getData(v.mainBody);
-			SCANcontroller.controller.LoadVisualMapTexture_Renamed(v.mainBody, mapSource.Data);
 
 			if (data == null)
 			{
@@ -139,7 +142,6 @@ namespace SCANsat.SCAN_Unity
 			// TODO: make this smarter about not doing work if it doesn't need to
 
 			data = SCANUtil.getData(v.mainBody);
-			SCANcontroller.controller.LoadVisualMapTexture_Renamed(v.mainBody, mapSource.Data);
 
 			if (data == null)
 			{
@@ -185,12 +187,21 @@ namespace SCANsat.SCAN_Unity
 
 			sensors = SCANcontroller.controller.activeSensorsOnVessel(v.id, false);
 
-			if (SCAN_Settings_Config.Instance.MapGenerationSpeed > 1)
+			if (SCANcontroller.controller.mainMapDisplayMode == MainMapDisplayMode.Visual)
 			{
-				drawPartialMap(SCANcontroller.controller.mainMapDisplayMode, false);
+				pumpVisualMap();
 			}
+			else
+			{
+				showTexture(map_small);
 
-			drawPartialMap(SCANcontroller.controller.mainMapDisplayMode, true);
+				if (SCAN_Settings_Config.Instance.MapGenerationSpeed > 1)
+				{
+					drawPartialMap(SCANcontroller.controller.mainMapDisplayMode, false);
+				}
+
+				drawPartialMap(SCANcontroller.controller.mainMapDisplayMode, true);
+			}
 
 			lastUpdate++;
 
@@ -392,7 +403,6 @@ namespace SCANsat.SCAN_Unity
 			v = FlightGlobals.ActiveVessel;
 
 			data = SCANUtil.getData(v.mainBody);
-			SCANcontroller.controller.LoadVisualMapTexture_Renamed(v.mainBody, mapSource.Data);
 
 			if (data == null)
 			{
@@ -413,7 +423,8 @@ namespace SCANsat.SCAN_Unity
 
 			resetImages();
 
-			uiElement.UpdateMapTexture(map_small);
+			shownTexture = null;
+			showTexture(map_small);   // Visual mode re-points to the GPU texture on the first Update
 
 			_isVisible = true;
 			SCANcontroller.controller.mainMapVisible = true;
@@ -986,7 +997,7 @@ namespace SCANsat.SCAN_Unity
 					break;
 
 				case MainMapDisplayMode.Visual:
-					// Visual is drawn by the GPU compositor (main-map port in the following commit); nothing for the CPU path to draw.
+					// Visual is composited on the GPU (pumpVisualMap); the CPU surface is never shown in that mode.
 					break;
 			}
 
@@ -1032,6 +1043,84 @@ namespace SCANsat.SCAN_Unity
 			}
 		}
 
+		/* Visual mode: composited on the GPU by a rectangular SCANmap the size of the small map.
+		   map_small stays the CPU surface for Terrain and Biome. */
+
+		private void ensureVisualMap()
+		{
+			if (visualMap != null && visualMap.Body == v.mainBody)
+			{
+				return;
+			}
+
+			destroyVisualMap();
+
+			visualMap = new SCANmap(v.mainBody, false, mapSource.Data);
+			visualMap.setProjection(MapProjection.Rectangular);
+			visualMap.setSize(360, 180);
+			visualMap.MType = mapType.Visual;
+			visualMap.setBody(v.mainBody);
+		}
+
+		private void resetVisualMap()
+		{
+			ensureVisualMap();
+
+			visualMap.ColorMap = Color;
+			visualMap.Terminator = TerminatorToggle;
+			visualMap.resetMap(false, false);
+		}
+
+		private void pumpVisualMap()
+		{
+			if (visualMap == null)
+			{
+				resetVisualMap();
+			}
+
+			// The small map is a live scanning display: when a pass completes, start another so newly
+			// scanned coverage shows up. A GPU pass is one Blit plus the cosmetic sweep, so this is cheap.
+			if (visualMap.isMapComplete())
+			{
+				visualMap.resetMap(false, false);
+			}
+
+			if (SCAN_Settings_Config.Instance.MapGenerationSpeed > 1)
+			{
+				visualMap.getPartialMap(false);
+			}
+
+			visualMap.getPartialMap(true);
+
+			showTexture(visualMap.DisplayTexture);
+		}
+
+		// The RawImage only needs re-pointing when the texture object changes (CPU Texture2D <->
+		// GPU RenderTexture, or a re-created RenderTexture); in-place updates show through.
+		private void showTexture(Texture t)
+		{
+			if (uiElement == null || t == null || ReferenceEquals(t, shownTexture))
+			{
+				return;
+			}
+
+			shownTexture = t;
+			uiElement.UpdateMapTexture(t);
+		}
+
+		private void destroyVisualMap()
+		{
+			if (visualMap == null)
+			{
+				return;
+			}
+
+			// Release this source's claim on the body's Visual textures, then the RT/material.
+			SCANcontroller.controller.UnloadVisualMapTexture(visualMap.Body, mapSource.Data);
+			visualMap.Destroy();
+			visualMap = null;
+		}
+
 		internal void resetImages()
 		{
 			for (int y = 0; y < map_small.height; y++)
@@ -1055,6 +1144,15 @@ namespace SCANsat.SCAN_Unity
 			{
 				biomeBuilding = true;
 				scanline = 0;
+			}
+
+			if (SCANcontroller.controller.mainMapDisplayMode == MainMapDisplayMode.Visual)
+			{
+				resetVisualMap();   // mode / colour / terminator / body changed: re-sync and start a fresh pass
+			}
+			else
+			{
+				destroyVisualMap();   // nothing is held for a map that is not showing Visual
 			}
 		}
 

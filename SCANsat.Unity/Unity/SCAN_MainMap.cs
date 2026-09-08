@@ -508,7 +508,7 @@ namespace SCANsat.Unity.Unity
 			m_PercentageText.OnTextUpdate.Invoke(text);
 		}
 
-		public void UpdateMapTexture(Texture2D map)
+		public void UpdateMapTexture(Texture map)
 		{
 			if (m_MainMap == null)
 			{
