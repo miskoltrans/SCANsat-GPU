@@ -6,8 +6,6 @@
     <File Path="CONTRIBUTING.md" />
     <File Path="LICENSE.txt" />
     <File Path="README.md" />
-    <File Path="SCANsat.props" />
-    <File Path="SCANsat.props.user" />
     <File Path="SCANsat.version.props" />
   </Folder>
   <Project Path="SCANmechjeb/SCANmechjeb.csproj" />

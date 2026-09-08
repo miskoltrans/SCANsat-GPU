@@ -3,8 +3,6 @@
 bin/
 obj/
 *.user
-*.dll
-*.pdb
 SCANsat.Unity/Properties/launchSettings.json
 GameData/SCANsat/Plugins/SCAN*
 GameData/SCANsat/PluginData/Settings.cfg

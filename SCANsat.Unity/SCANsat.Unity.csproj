@@ -6,8 +6,10 @@
     <TargetFramework>net4.8</TargetFramework>
   </PropertyGroup>
   <PropertyGroup>
+	  <!-- Loaded by the Unity editor project too: no KSP assemblies, no KSPAssembly attributes. -->
+	  <KSPBT_ReferenceGameAssemblies>false</KSPBT_ReferenceGameAssemblies>
 	  <KSPBT_GenerateAssemblyAttribute>false</KSPBT_GenerateAssemblyAttribute>
-	  <KSPBT_GenerateDependencyAttributes>true</KSPBT_GenerateDependencyAttributes>
+	  <KSPBT_GenerateDependencyAttributes>false</KSPBT_GenerateDependencyAttributes>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="KSPBuildTools" Version="1.1.1" />
