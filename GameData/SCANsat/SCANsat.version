@@ -1,6 +1,7 @@
 {
-  "NAME": "SCANsat-GPU",
-  "URL": "https://github.com/miskoltrans/SCANsat-GPU/releases/latest/download/SCANsat.version",
-  "DOWNLOAD": "https://github.com/miskoltrans/SCANsat-GPU/releases"
-
+  "NAME": "SCANsat",
+  "VERSION": "21.1.0.0",
+  "KSP_VERSION": "1.12",
+  "KSP_VERSION_MIN": "1.12.3",
+  "KSP_VERSION_MAX": "1.12"
 }
