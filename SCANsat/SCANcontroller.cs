@@ -853,6 +853,12 @@ namespace SCANsat
 
 		public override void OnLoad(ConfigNode node)
 		{
+			// Saves from before mainMapDisplayMode existed stored the main map's mode as a bool.
+			if (node.HasValue("mainMapBiome") && !node.HasValue("mainMapDisplayMode"))
+			{
+				mainMapDisplayMode = node.parse("mainMapBiome", false) ? MainMapDisplayMode.Biome : MainMapDisplayMode.Terrain;
+			}
+
 			if (storageUpgraded)
 			{
 				ConfigNode node_vessels = node.GetNode("Scanners");
@@ -1038,22 +1044,6 @@ namespace SCANsat
 						{
 							node_body.AddValue("LandingTarget", string.Format("{0:N4},{1:N4}", w.Latitude, w.Longitude));
 						}
-					}
-
-					SCANterrainConfig body_config = SCANUtil.getTerrainConfig(body_scan);
-					if (body_config != null)
-					{
-						node_body.AddValue("MinHeightRange", body_config.MinTerrain / body_config.MinHeightMultiplier);
-						node_body.AddValue("MaxHeightRange", body_config.MaxTerrain / body_config.MaxHeightMultiplier);
-						if (body_config.ClampTerrain != null)
-						{
-							node_body.AddValue("ClampHeight", body_config.ClampTerrain / body_config.ClampHeightMultiplier);
-						}
-
-						node_body.AddValue("PaletteName", body_config.ColorPal.Name);
-						node_body.AddValue("PaletteSize", body_config.PalSize);
-						node_body.AddValue("PaletteReverse", body_config.PalRev);
-						node_body.AddValue("PaletteDiscrete", body_config.PalDis);
 					}
 					node_body.AddValue("Map", body_scan.shortSerialize());
 					node_progress.AddNode(node_body);
