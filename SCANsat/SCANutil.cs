@@ -252,7 +252,7 @@ namespace SCANsat
 		}
 
 		/// <summary>
-		/// For a given Celestial Body name this returns the SCANdata instance if it exists in the SCANcontroller master dictionary; return is null if the SCANdata does not exist for that body (ie it has never been visited while SCANsat has been active), or if the SCANcontroller Scenario Module has not been loaded.
+		/// For a given Celestial Body name this returns the SCANdata instance if it exists in the SCANcontroller master dictionary; return is null if the SCANdata does not exist for that body (ie it has never been visited while SCANsat has been active).
 		/// </summary>
 		/// <param name="BodyName">Name of celestial body (do not use displayName string)</param>
 		/// <returns>SCANdata instance for the given Celestial Body; null if none exists</returns>
@@ -267,7 +267,7 @@ namespace SCANsat
 		}
 
 		/// <summary>
-		/// For a given Celestial Body, this returns the SCANterrainConfig instance if it exists in the SCANcontroller master dictionary; return is null if the SCANterrainConfig does not exist for that body (likely not generated or loaded properly), or if the SCANcontroller Scenario Module has not been loaded.
+		/// For a given Celestial Body, this returns the SCANterrainConfig instance if it exists in the SCANcontroller master dictionary; return is null if the SCANterrainConfig does not exist for that body (likely not generated or loaded properly).
 		/// </summary>
 		/// <param name="body">Instance of celestial body</param>
 		/// <returns>SCANterrainConfig instance for the given Celestial Body; null if none exists</returns>
@@ -277,7 +277,7 @@ namespace SCANsat
 		}
 
 		/// <summary>
-		/// For a given SCANdata instance of a celestial body, this returns the SCANterrainConfig instance if it exists in the SCANcontroller master dictionary; return is null if the SCANterrainConfig does not exist for that body (likely not generated or loaded properly), or if the SCANcontroller Scenario Module has not been loaded.
+		/// For a given SCANdata instance of a celestial body, this returns the SCANterrainConfig instance if it exists in the SCANcontroller master dictionary; return is null if the SCANterrainConfig does not exist for that body (likely not generated or loaded properly).
 		/// </summary>
 		/// <param name="data">SCANdata instance for a celestial body</param>
 		/// <returns>SCANterrainConfig instance for the given Celestial Body; null if none exists</returns>
@@ -287,17 +287,13 @@ namespace SCANsat
 		}
 
 		/// <summary>
-		/// For a given Celestial Body name, this returns the SCANterrainConfig instance if it exists in the SCANcontroller master dictionary; return is null if the SCANterrainConfig does not exist for that body (likely not generated or loaded properly), or if the SCANcontroller Scenario Module has not been loaded.
+		/// For a given Celestial Body name, this returns the SCANterrainConfig instance if it exists in the SCANcontroller master dictionary; return is null if the SCANterrainConfig does not exist for that body (likely not generated or loaded properly).
 		/// </summary>
 		/// <param name="BodyName">Name of celestial body (do not use displayName string)</param>
 		/// <returns>SCANterrainConfig instance for the given Celestial Body; null if none exists</returns>
 		public static SCANterrainConfig getTerrainConfig(string BodyName)
 		{
-			if (SCANcontroller.controller == null)
-			{
-				return null;
-			}
-
+			// masterTerrainNodes is static: no ScenarioModule instance needed (it is null at the main menu, where configs are first generated).
 			return SCANcontroller.getTerrainNode(BodyName);
 		}
 
@@ -308,35 +304,39 @@ namespace SCANsat
 		/// <returns>SCANterrainConfig instance for the given Celestial Body</returns>
 		public static SCANterrainConfig generateTerrainConfig(CelestialBody b)
 		{
+			// Every body gets a config, PQS or not: the map, legend and colour-UI paths all assume one
+			// exists per body (the master dictionary replaced a per-SCANdata field that was never null).
+			// Gas giants and other PQS-less bodies simply get the default height range.
+			float newMin = SCANconfigLoader.SCANNode.DefaultMinHeightRange;
+			float newMax = SCANconfigLoader.SCANNode.DefaultMaxHeightRange;
+
 			if (b.pqsController == null)
 			{
-				SCANUtil.SCANlog($"[{b.name}] PQS Controller not loaded - no terrain data generated.");
-				return null;
+				SCANlog($"[{b.name}] No PQS controller - terrain config uses the default height range.");
+			}
+			else
+			{
+				try
+				{
+					newMin = ((float)(b.pqsController.radiusMin - b.pqsController.radius)).Mathf_Round(-1);
+					newMax = ((float)(b.pqsController.radiusMax - b.pqsController.radius)).Mathf_Round(-1);
+					if (newMin == newMax)
+					{
+						throw new Exception("Gas Giant / Flat Body");  // Clamp altimetry if body is perfectly smooth / gas giant
+					}
+				}
+				catch (Exception e)
+				{
+					SCANlog($"[{b.name}] Error in calculating Max Height; using default value\n{e}");
+					newMin = SCANconfigLoader.SCANNode.DefaultMinHeightRange;
+					newMax = SCANconfigLoader.SCANNode.DefaultMaxHeightRange;
+				}
 			}
 
 			float? clamp = null;
 			if (b.ocean)
 			{
 				clamp = 0;
-			}
-
-			float newMin;
-			float newMax;
-
-			try
-			{
-				newMin = ((float)(b.pqsController.radiusMin - b.pqsController.radius)).Mathf_Round(-1);
-				newMax = ((float)(b.pqsController.radiusMax - b.pqsController.radius)).Mathf_Round(-1);
-				if (newMin == newMax)
-				{
-					throw new Exception("Gas Giant / Flat Body");  // Clamp altimetry if body is perfectly smooth / gas giant
-				}
-			}
-			catch (Exception e)
-			{
-				SCANlog($"[{b.name}] Error in calculating Max Height; using default value\n{e}");
-				newMin = SCANconfigLoader.SCANNode.DefaultMinHeightRange;
-				newMax = SCANconfigLoader.SCANNode.DefaultMaxHeightRange;
 			}
 
 			SCANterrainConfig config = new SCANterrainConfig(newMin, newMax, clamp, PaletteLoader(SCANconfigLoader.SCANNode.DefaultPalette, 7), 7, false, false, b);

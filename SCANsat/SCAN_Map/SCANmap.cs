@@ -1131,7 +1131,7 @@ namespace SCANsat.SCAN_Map
 
 				float tMin, tRange;
 				if (useCustomRange) { tMin = customMin; tRange = customRange; }
-				else { tMin = data.TerrainConfig.MinTerrain; tRange = data.TerrainConfig.MaxTerrain - data.TerrainConfig.MinTerrain; }
+				else { SCANterrainConfig tc = SCANUtil.getTerrainConfig(data); tMin = tc.MinTerrain; tRange = tc.MaxTerrain - tc.MinTerrain; }
 				if (tRange <= 0f) tRange = 1f;
 				compositeMaterial.SetFloat("_TerrainMin", tMin);
 				compositeMaterial.SetFloat("_TerrainRange", tRange);
@@ -1165,8 +1165,9 @@ namespace SCANsat.SCAN_Map
 				compositeMaterial.SetFloat("_StockBiomes", (SCAN_Settings_Config.Instance.BigMapStockBiomes && colorMap) ? 1f : 0f);
 				// elevation underlay: biome blends its colour with grey elevation by BiomeTransparency
 				compositeMaterial.SetTexture("_ElevationTex", elevationTex);
-				float bRange = data.TerrainConfig.MaxTerrain - data.TerrainConfig.MinTerrain;
-				compositeMaterial.SetFloat("_TerrainMin", data.TerrainConfig.MinTerrain);
+				SCANterrainConfig tc = SCANUtil.getTerrainConfig(data);
+				float bRange = tc.MaxTerrain - tc.MinTerrain;
+				compositeMaterial.SetFloat("_TerrainMin", tc.MinTerrain);
 				compositeMaterial.SetFloat("_TerrainRange", bRange <= 0f ? 1f : bRange);
 			}
 
@@ -1286,7 +1287,8 @@ namespace SCANsat.SCAN_Map
 
 		private void buildPaletteLUT(float min, float range)
 		{
-			int hash = data.TerrainConfig.ColorPal.Hash ^ (colorMap ? 1 : 0) ^ min.GetHashCode() ^ range.GetHashCode() ^ (useCustomRange ? 2 : 0);
+			SCANterrainConfig tc = SCANUtil.getTerrainConfig(data);
+			int hash = tc.ColorPal.Hash ^ (colorMap ? 1 : 0) ^ min.GetHashCode() ^ range.GetHashCode() ^ (useCustomRange ? 2 : 0);
 			if (paletteLUT != null && paletteLUTHash == hash)
 				return;
 			if (paletteLUT == null)
@@ -1305,11 +1307,11 @@ namespace SCANsat.SCAN_Map
 			{
 				float val = min + (x / 1023f) * range;
 				lut[x] = useCustomRange
-					? (Color)palette.heightToColor(val, colorMap, data.TerrainConfig, customMin, customMax, customRange, true)
-					: (Color)palette.heightToColor(val, colorMap, data.TerrainConfig);
+					? (Color)palette.heightToColor(val, colorMap, tc, customMin, customMax, customRange, true)
+					: (Color)palette.heightToColor(val, colorMap, tc);
 				grey[x] = useCustomRange
-					? (Color)palette.heightToColor(val, false, data.TerrainConfig, customMin, customMax, customRange, true)
-					: (Color)palette.heightToColor(val, false, data.TerrainConfig);
+					? (Color)palette.heightToColor(val, false, tc, customMin, customMax, customRange, true)
+					: (Color)palette.heightToColor(val, false, tc);
 			}
 			paletteLUT.SetPixels(lut);
 			paletteLUT.Apply(false);
