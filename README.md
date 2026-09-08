@@ -183,7 +183,7 @@ SCANSAT_BODY_TEXTURES
 }
 ```
 
-With these paths defined, the CPU is able to pull data directly out of the texture from the file system without loading it into RAM. Planet pack makers are encouraged to use this new interface with their packs as this directly specifies the textures SCANsat will display in game.
+With these paths defined, SCANsat loads a single mip level of each file straight to the GPU through KSPTextureLoader - the smallest level that still covers the open map - so RAM use does not grow with texture size, and Kopernicus OnDemand is never asked to load the body's full ScaledSpace textures just to draw a map. Bodies without a config fall back to their ScaledSpace textures. SCANsat ships configs for Real Solar System (`Patches/RSS_BodyTextures.cfg`); planet pack makers are encouraged to ship their own, as this directly specifies the textures SCANsat will display in game.
 
 #### [:top:][top] 1d. Other Add-Ons 
 
