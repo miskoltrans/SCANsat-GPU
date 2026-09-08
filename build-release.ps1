@@ -10,29 +10,29 @@ The zip is assembled from git-tracked GameData/SCANsat content (so gitignored bu
 user's PluginData/Settings.cfg are excluded), with the freshly built DLLs + the build-stamped
 .version overlaid on top.
 
-Usage:   .\build-release.ps1 [-KspRoot C:\git\ksp\ksp_ro_expanded] [-Version 21.1.1]
+Usage:   .\build-release.ps1 [-KspRoot ..\Instance] [-Version 21.1.1]
 Requires: dotnet SDK, git, PowerShell 5+.
 #>
 [CmdletBinding()]
 param(
-    [string]$KspRoot = "C:\git\ksp\ksp_ro_expanded",
+    [string]$KspRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) "Instance"),
     [string]$Version
 )
 $ErrorActionPreference = "Stop"
 $root    = Split-Path -Parent $MyInvocation.MyCommand.Path
-$proj    = Join-Path $root "SCANsat\SCANsat.csproj"
-$bin     = Join-Path $root "SCANsat\bin\Release\net4.8"
+$sln     = Join-Path $root "SCANsat.slnx"
+$built   = Join-Path $root "GameData\SCANsat\Plugins"   # KSPBuildTools writes every project's DLL here
 $verFile = Join-Path $root "GameData\SCANsat\SCANsat.version"
 
-# Version source of truth = SCANsat.version.props (override with -Version). The csproj does NOT import
-# that props file, so pass it to the build explicitly as $(Version); KSPBuildTools stamps whatever
-# $(Version) resolves to into GameData\SCANsat\SCANsat.version.
+# Version source of truth = SCANsat.version.props (imported by Directory.Build.props; -Version overrides).
+# KSPBuildTools stamps $(Version) into the assemblies and into GameData\SCANsat\SCANsat.version.
 if (-not $Version) {
     [xml]$vp = Get-Content (Join-Path $root "SCANsat.version.props")
     $Version = ([string]($vp.Project.PropertyGroup.Version | Select-Object -First 1)).Trim()
 }
-Write-Host "==> Building SCANsat.dll (Release) v$Version against $KspRoot"
-dotnet build $proj -c Release -p:Version=$Version -p:KSPRoot=$($KspRoot -replace '\\','/') -p:RepoRootPath="$($root -replace '\\','/')/"
+Write-Host "==> Building SCANsat, SCANsat.Unity, SCANmechjeb (Release) v$Version against $KspRoot"
+# Never let the build run ckan against the install; local .csproj.user files say the same, this is the belt.
+dotnet build $sln -c Release -p:Version=$Version -p:KSPBT_GameRoot=$($KspRoot -replace '\\','/') -p:KSPBT_InstallCKANDependencies=false
 if ($LASTEXITCODE -ne 0) { throw "dotnet build failed" }
 
 # KSPBuildTools regenerated GameData\SCANsat\SCANsat.version with VERSION/KSP_VERSION filled in.
@@ -56,11 +56,14 @@ $sat = Join-Path $stage "GameData\SCANsat"
 # 2) overlay the build-stamped .version (archive shipped the pre-build template)
 Copy-Item $verFile (Join-Path $sat "SCANsat.version") -Force
 
-# 3) overlay freshly built DLLs
+# 3) overlay freshly built DLLs. SCANmechjeb.dll carries a KSPAssemblyDependency on MechJeb2, so KSP
+#    skips it when MechJeb is not installed; it only builds when MechJeb2.dll is in the KSP install.
 $plugins = Join-Path $sat "Plugins"
 New-Item -ItemType Directory -Path $plugins -Force | Out-Null
-Copy-Item (Join-Path $bin "SCANsat.dll")       $plugins -Force
-Copy-Item (Join-Path $bin "SCANsat.Unity.dll") $plugins -Force
+foreach ($dll in "SCANsat.dll","SCANsat.Unity.dll","SCANmechjeb.dll") {
+    $src = Join-Path $built $dll
+    if (Test-Path $src) { Copy-Item $src $plugins -Force } else { Write-Warning "$dll was not built - not shipped" }
+}
 
 # 4) license must travel with the (BSD) distribution
 Copy-Item (Join-Path $root "LICENSE.txt") (Join-Path $sat "LICENSE.txt") -Force
@@ -81,10 +84,7 @@ try {
 } finally { $fs.Dispose() }
 Copy-Item $verFile (Join-Path $dist "SCANsat.version") -Force
 
-# 6) undo build side effects so the working tree stays clean
-foreach ($f in "GameData\SCANsat.dll","GameData\SCANsat.pdb","GameData\SCANsat.Unity.dll","GameData\SCANsat.Unity.pdb") {
-    Remove-Item (Join-Path $root $f) -ErrorAction SilentlyContinue
-}
+# 6) undo the build's one side effect on tracked files (the stamped .version) so the working tree stays clean
 git -C $root checkout -- GameData/SCANsat/SCANsat.version
 
 Write-Host ""
