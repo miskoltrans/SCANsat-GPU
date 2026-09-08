@@ -321,8 +321,8 @@ namespace SCANsat.SCAN_Unity
 			get { return _edgeDetectShader; }
 		}
 
-		// Null until the scan_shaders bundle is rebuilt to include SCANVisualComposite.shader;
-		// SCANmap falls back to the CPU Visual renderer while it is null.
+		// Null when the bundle lacks the shader or it is unsupported on this graphics API; SCANmap
+		// then has no Visual renderer and draws Visual maps as unscanned (see SCANmap.willRenderGPU).
 		public static Shader VisualCompositeShader
 		{
 			get { return _visualCompositeShader; }
@@ -430,7 +430,16 @@ namespace SCANsat.SCAN_Unity
 				}
 				else if (s.name == "Hidden/SCANsat/VisualComposite")
 				{
-					_visualCompositeShader = s;
+					// A shader can load from the bundle and still be unusable on this graphics API (it
+					// would render magenta). Treat that as "no shader" so SCANmap degrades cleanly.
+					if (s.isSupported)
+					{
+						_visualCompositeShader = s;
+					}
+					else
+					{
+						SCANUtil.SCANlog("Shader {0} is not supported on {1}; Visual maps disabled", s.name, SystemInfo.graphicsDeviceType);
+					}
 				}
 			}
 

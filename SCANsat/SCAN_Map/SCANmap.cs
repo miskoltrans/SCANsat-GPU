@@ -999,7 +999,7 @@ namespace SCANsat.SCAN_Map
 				return false;
 			switch (m)
 			{
-				case mapType.Visual: return SCANcontroller.controller.getScaledSpaceSource(body, out _, out _, out _, out _);
+				case mapType.Visual: return SCAN_Settings_Config.Instance.VisibleMapsActive && SCANcontroller.controller.getScaledSpaceSource(body, out _, out _, out _, out _);   // the setting disables Visual maps outright (the CPU path only honoured it by accident)
 				// Altimetry/Slope/Biome need the filled CPU caches (big_heightmap / biome_indexmap),
 				// which only the cache=true map (BigMap, via setWidth) allocates + fills. ZoomMap/RPM
 				// (cache=false, setSize) keep the CPU path for these modes; Visual GPU still works there.
