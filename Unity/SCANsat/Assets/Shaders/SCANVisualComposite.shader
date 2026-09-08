@@ -131,6 +131,8 @@ Shader "Hidden/SCANsat/VisualComposite"
 			// Pixel raw coords -> geographic lon/lat (degrees). Returns false for out-of-disc pixels.
 			bool unproject(float lonRaw, float latRaw, out float lon, out float lat)
 			{
+				lon = 0.0;   // assigned again below; keeps FXC from flagging the outs as maybe-uninitialised
+				lat = 0.0;
 				normalizeRaw(lonRaw, latRaw);
 				lon = lonRaw;
 				lat = latRaw;
@@ -179,9 +181,9 @@ Shader "Hidden/SCANsat/VisualComposite"
 					lat = RAD2DEG * asin(cos(c2) * sin(centerLat) + (latr * sin(c2) * cos(centerLat)) / p2);
 				}
 
-				if (isnan(lon) || isnan(lat)) return false;
-				if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) return false;
-				return true;
+				// Written so a NaN fails too: FXC compiles under fast-math and may drop isnan(), and every
+				// comparison with NaN is false, so "NaN or out of range -> false" has to be one positive test.
+				return lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0;
 			}
 
 			// SCANcolorUtil.ConvertToGrayscale weights.
