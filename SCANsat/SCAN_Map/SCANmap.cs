@@ -1290,7 +1290,7 @@ namespace SCANsat.SCAN_Map
 			biomeLUT.filterMode = FilterMode.Point;
 			biomeLUT.wrapMode = TextureWrapMode.Clamp;
 			Color[] c = new Color[w];
-			for (int i = 0; i < n; i++) c[i] = body.BiomeMap.Attributes[i].mapColor;
+			for (int i = 0; i < n; i++) c[i] = SCANUtil.getBiomeDisplayColor(body, i);   // one colour source for map, legend and tooltips (grayscale-encoded biome maps get a generated palette)
 			biomeLUT.SetPixels(c);
 			biomeLUT.Apply(false);
 			biomeLUTCount = n;
