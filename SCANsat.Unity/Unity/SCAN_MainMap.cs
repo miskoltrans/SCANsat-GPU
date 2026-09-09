@@ -538,9 +538,13 @@ namespace SCANsat.Unity.Unity
 			mapInterface.TerminatorToggle = isOn;
 		}
 
+		// Set while ToggleType writes m_TypeToggle.isOn: Toggle fires onValueChanged synchronously
+		// on any change, which would re-enter here and advance the mode again on the same click.
+		private bool typeToggleSyncing;
+
 		public void ToggleType(bool isOn)
 		{
-			if (!loaded || mapInterface == null)
+			if (!loaded || mapInterface == null || typeToggleSyncing)
 			{
 				return;
 			}
@@ -586,10 +590,19 @@ namespace SCANsat.Unity.Unity
 				m_TypeLabel.OnTextUpdate.Invoke(label);
 			}
 
-			// Update toggle appearance (cycle through states visually)
+			// Update toggle appearance: on for Visual/Biome, off for Terrain. Guarded rather than
+			// SetIsOnWithoutNotify so it does not depend on the UnityEngine.UI version KSP ships.
 			if (m_TypeToggle != null)
 			{
-				m_TypeToggle.isOn = (nextMode != MainMapDisplayMode.Terrain);
+				typeToggleSyncing = true;
+				try
+				{
+					m_TypeToggle.isOn = (nextMode != MainMapDisplayMode.Terrain);
+				}
+				finally
+				{
+					typeToggleSyncing = false;
+				}
 			}
 		}
 
