@@ -1453,9 +1453,6 @@ namespace SCANsat
 				}
 			}
 
-			// Drop the static height-map cache, which otherwise persists for the whole process.
-			SCANdata.ClearHeightMaps();
-
 			// GPU textures loaded for Visual maps are not scene-managed either.
 			foreach (SCANtextures t in mapTextureHandler.Values)
 			{

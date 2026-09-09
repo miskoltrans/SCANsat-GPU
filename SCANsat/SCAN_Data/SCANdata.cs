@@ -66,18 +66,6 @@ namespace SCANsat.SCAN_Data
 			tempHeightMap = heightMaps[copy.body.flightGlobalsIndex];
 		}
 
-		/// <summary>
-		/// The height-map cache is static, so it otherwise survives scene changes for the whole
-		/// process (~253 KB per body ever map-viewed) and is never freed. Cleared on controller
-		/// teardown; entries regenerate on demand the next time a map is drawn. Safe because
-		/// HeightMapValue tolerates a missing entry (returns 0) and SCANdata instances are rebuilt
-		/// per scene, so the 'built' flag re-evaluates against the now-empty cache.
-		/// </summary>
-		internal static void ClearHeightMaps()
-		{
-			heightMaps.Clear();
-		}
-
 		#region Public accessors
 		/* Accessors: body-specific variables */
 		public Int16[,] Coverage

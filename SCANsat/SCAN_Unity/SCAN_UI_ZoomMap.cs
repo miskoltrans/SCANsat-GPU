@@ -417,6 +417,12 @@ namespace SCANsat.SCAN_Unity
 			rebuilding = true;
 
 			spotmap.resetMap(ResourceToggle, narrowBand);
+
+			// DisplayTexture changes object identity between the CPU Texture2D and the GPU RenderTexture
+			// (Visual <-> the other modes, which are CPU-drawn on the zoom map). The RawImage is only
+			// re-pointed when updateMap is set, so a mode switch into Visual otherwise leaves it showing
+			// the never-painted CPU texture. Same fix the big map has in its map-type setter.
+			updateMap = true;
 		}
 
 		public void resetMapToVessel()
