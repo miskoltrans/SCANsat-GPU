@@ -253,7 +253,6 @@ namespace SCANsat.SCAN_Unity
 				// Also page out the body's OnDemand ScaledSpace (loaded in SCANmap.setBody). Guarded
 				// against evicting a body the zoom map still shows; only unloads when this window closes.
 				SCANcontroller.controller.unloadOnDemandScaledSpace(bigmap.Body, mapSource.BigMap);
-				SCANcontroller.controller.UnloadVisualMapTexture(bigmap.Body, mapSource.BigMap);
 			}
 
 			if (uiElement == null)

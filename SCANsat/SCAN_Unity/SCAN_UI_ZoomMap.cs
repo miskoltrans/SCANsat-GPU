@@ -209,7 +209,6 @@ namespace SCANsat.SCAN_Unity
 				// Also page out the body's OnDemand ScaledSpace (loaded in SCANmap.setBody); guarded
 				// against evicting a body the big map still shows.
 				SCANcontroller.controller.unloadOnDemandScaledSpace(spotmap.Body, mapSource.ZoomMap);
-				SCANcontroller.controller.UnloadVisualMapTexture(spotmap.Body, mapSource.ZoomMap);
 			}
 
 			if (uiElement == null)
