@@ -113,6 +113,11 @@ namespace SCANsat.SCAN_Data
 
 		public override void OnDecodeFromConfigNode()
 		{
+			// Loaded from SCANcolors.cfg: bind to the body by name. Stays null for an entry that
+			// names no body in this game (the stock entries under a planet pack); such entries are
+			// never selected by the colour UI, which offers only FlightGlobals bodies.
+			body = FlightGlobals.Bodies.FirstOrDefault(b => b.bodyName == name);
+
 			colorPal = SCANUtil.PaletteLoader(paletteName, paletteSize);
 
 			float tempClamp = 0;
