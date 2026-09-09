@@ -72,7 +72,7 @@ namespace SCANsat.SCAN_Map
 			if (legend != null) UnityEngine.Object.Destroy(legend);
 			legend = new Texture2D(256, 1, TextureFormat.RGB24, false);
 			legendMin = min;
-			legendMin = max;
+			legendMax = max;
 			legendScheme = color;
 			dataPalette = terrain.ColorPal;
 			Color32[] pix = new Color32[256];
