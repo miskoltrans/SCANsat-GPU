@@ -312,7 +312,7 @@ namespace SCANsat
 
 			if (b.pqsController == null)
 			{
-				SCANlog($"[{b.name}] No PQS controller - terrain config uses the default height range.");
+				// Gas giants and other PQS-less bodies: nothing to measure, defaults apply (logged below).
 			}
 			else
 			{
@@ -327,11 +327,13 @@ namespace SCANsat
 				}
 				catch (Exception e)
 				{
-					SCANlog($"[{b.name}] Error in calculating Max Height; using default value\n{e}");
+					SCANlog($"[{b.name}] terrain range unavailable ({e.Message}); using the default range");
 					newMin = SCANconfigLoader.SCANNode.DefaultMinHeightRange;
 					newMax = SCANconfigLoader.SCANNode.DefaultMaxHeightRange;
 				}
 			}
+
+			SCANlog("[{0}] terrain config generated: {1:F0} m to {2:F0} m{3}", b.name, newMin, newMax, b.pqsController == null ? " (no PQS controller: defaults)" : "");
 
 			float? clamp = null;
 			if (b.ocean)

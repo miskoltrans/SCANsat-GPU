@@ -53,8 +53,8 @@ namespace SCANsat
 		/* GPU textures loaded from the cfg, one mip each */
 		private SCANddsHeader colorHeader;
 		private SCANddsHeader normalHeader;
-		private Texture2D colorTex;
-		private Texture2D normalTex;
+		private Texture colorTex;    // the loader's Texture2D, or a RenderTexture holding a downscale of a mip-less file
+		private Texture normalTex;
 		private int colorMip = -1;
 		private int normalMip = -1;
 		private bool colorFailed;    // header or loader rejected the file: logged once, not retried
@@ -178,6 +178,21 @@ namespace SCANsat
 		/// </summary>
 		public bool EnsureLoaded(int targetWidth)
 		{
+			// A RenderTexture downscale loses its contents on a graphics device reset; rebuild it then.
+			if (colorTex is RenderTexture crt && !crt.IsCreated())
+			{
+				destroyTexture(colorTex);
+				colorTex = null;
+				colorMip = -1;
+			}
+
+			if (normalTex is RenderTexture nrt && !nrt.IsCreated())
+			{
+				destroyTexture(normalTex);
+				normalTex = null;
+				normalMip = -1;
+			}
+
 			if (colorMapPath != null && !colorFailed)
 			{
 				loadMip(colorMapPath, "colorMap", false, targetWidth, ref colorHeader, ref colorTex, ref colorMip, ref colorFailed);
@@ -191,7 +206,7 @@ namespace SCANsat
 			return colorTex != null;
 		}
 
-		private void loadMip(string path, string role, bool linear, int targetWidth, ref SCANddsHeader header, ref Texture2D tex, ref int loadedMip, ref bool failed)
+		private void loadMip(string path, string role, bool linear, int targetWidth, ref SCANddsHeader header, ref Texture tex, ref int loadedMip, ref bool failed)
 		{
 			if (header == null && !SCANddsHeader.TryRead(path, out header, out string error))
 			{
@@ -225,17 +240,46 @@ namespace SCANsat
 				loaded.wrapModeV = TextureWrapMode.Clamp;
 				loaded.filterMode = FilterMode.Bilinear;
 
-				if (tex != null)
+				Texture result = loaded;
+				string note = "";
+
+				if (header.MipCount == 1)
 				{
-					UnityEngine.Object.Destroy(tex);
+					int w = Mathf.Min(header.Width, Mathf.NextPowerOfTwo(targetWidth));
+					int h = Mathf.Max(1, (int)((long)w * header.Height / header.Width));
+					long rtBytes = (long)w * h * 4;
+
+					// No mip chain to choose from, so the only level is the full-size one (RSS ships most of
+					// its PluginData maps that way: 16K, one level, 128 MiB). When a GPU downscale that covers
+					// the request is clearly smaller, keep that instead and release the base level - the
+					// transient cost is the same, the resident cost drops from 128 MiB to 2.
+					if (rtBytes * 2 < header.MipBytes(0))
+					{
+						RenderTexture rt = new RenderTexture(w, h, 0, RenderTextureFormat.ARGB32, linear ? RenderTextureReadWrite.Linear : RenderTextureReadWrite.sRGB);
+						rt.name = $"SCANsat {body.name} {role} downscale";
+						rt.wrapModeU = TextureWrapMode.Repeat;
+						rt.wrapModeV = TextureWrapMode.Clamp;
+						rt.filterMode = FilterMode.Bilinear;
+						rt.useMipMap = false;
+						rt.Create();
+						Graphics.Blit(loaded, rt);
+						UnityEngine.Object.Destroy(loaded);
+						result = rt;
+						note = $"; no mip chain, kept a {w}x{h} GPU downscale ({rtBytes / 1048576f:F1} MiB) and released the base level";
+					}
 				}
 
-				tex = loaded;
+				if (tex != null)
+				{
+					destroyTexture(tex);
+				}
+
+				tex = result;
 				loadedMip = mip;
 
-				SCANUtil.SCANlog("[{0}] {1}: mip {2}/{3} ({4}x{5} {6}, {7:F1} MiB at offset {8}) for target width {9}px in {10:F0} ms",
+				SCANUtil.SCANlog("[{0}] {1}: mip {2}/{3} ({4}x{5} {6}, {7:F1} MiB at offset {8}) for target width {9}px in {10:F0} ms{11}",
 					body.name, role, mip, header.MipCount, config.Width, config.Height, header.FormatName,
-					header.MipBytes(mip) / 1048576f, header.MipOffset(mip), targetWidth, (Time.realtimeSinceStartup - start) * 1000f);
+					header.MipBytes(mip) / 1048576f, header.MipOffset(mip), targetWidth, (Time.realtimeSinceStartup - start) * 1000f, note);
 			}
 			catch (Exception e)
 			{
@@ -245,17 +289,27 @@ namespace SCANsat
 			}
 		}
 
+		private static void destroyTexture(Texture t)
+		{
+			if (t is RenderTexture rt)
+			{
+				rt.Release();
+			}
+
+			UnityEngine.Object.Destroy(t);
+		}
+
 		public void Release()
 		{
 			if (colorTex != null)
 			{
-				UnityEngine.Object.Destroy(colorTex);
+				destroyTexture(colorTex);
 				colorTex = null;
 			}
 
 			if (normalTex != null)
 			{
-				UnityEngine.Object.Destroy(normalTex);
+				destroyTexture(normalTex);
 				normalTex = null;
 			}
 
@@ -573,11 +627,16 @@ namespace SCANsat
 					continue;
 				}
 
-				if (SCANUtil.getTerrainConfig(b) == null)
+				if (!hasTerrainNode(b.bodyName))   // quiet check: the getter logs "cannot be found" for every body on first generation
 				{
 					SCANUtil.generateTerrainConfig(b);  // Sets the terrain config in the dictionary
 				}
 			}
+		}
+
+		public static bool hasTerrainNode(string name)
+		{
+			return masterTerrainNodes.ContainsKey(name);
 		}
 
 		public static SCANterrainConfig getTerrainNode(string name)
