@@ -41,23 +41,27 @@ namespace SCANmechjeb
 		private readonly static FieldInfo hiddenField;
 
 		/// <summary>
-		/// Reflectively fetches MechJebCore fields, tolerating the
-		/// 'Target'/'target' field rename across MechJeb versions. Returns null
-		/// (and logs) if the field can't be resolved under any known name.
+		/// Reflectively fetches MechJebCore.Target and DisplayModule.Hidden, tolerating the
+		/// 'Target'/'target' and 'Hidden'/'hidden' renames across MechJeb versions. Each is
+		/// left null (and logged) if it can't be resolved under any known name.
 		/// </summary>
 		static SCANmechjeb()
 		{
-			var t = new MechJebCore().GetType();
-			targetField = t.GetField("Target") ?? t.GetField("target");
+			// typeof, not `new MechJebCore()`: MechJebCore is a PartModule and Unity refuses
+			// MonoBehaviours constructed with `new`.
+			var coreType = typeof(MechJebCore);
+			targetField = coreType.GetField("Target") ?? coreType.GetField("target");
 			if (targetField == null)
 			{
 				Log.Message("MechJebCore 'target' field could not be found under any known name; MechJeb support broken.");
 			}
 
-			hiddenField = t.GetField("Hidden") ?? t.GetField("hidden");
+			// Hidden is declared on DisplayModule (the landing guidance module's base), not on MechJebCore.
+			var moduleType = typeof(DisplayModule);
+			hiddenField = moduleType.GetField("Hidden") ?? moduleType.GetField("hidden");
 			if (hiddenField == null)
 			{
-				Log.Message("MechJebGuidanceModule 'hidden' field could not be found under any known name; MechJeb support broken.");
+				Log.Message("DisplayModule 'hidden' field could not be found under any known name; MechJeb support broken.");
 			}
 		}
 
