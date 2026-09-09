@@ -858,6 +858,31 @@ namespace SCANsat.SCAN_Data
 					heightMaps.Add(body.flightGlobalsIndex, tempHeightMap);
 				}
 
+				// The sampled map is the only reliable source for the body's real height range; fit the
+				// auto-generated palette range to it (no-op for user-set or cfg-provided ranges).
+				float hMin = float.MaxValue;
+				float hMax = float.MinValue;
+
+				for (int x = 0; x < 360; x++)
+				{
+					for (int y = 0; y < 180; y++)
+					{
+						float v = tempHeightMap[x, y];
+
+						if (v < hMin)
+						{
+							hMin = v;
+						}
+
+						if (v > hMax)
+						{
+							hMax = v;
+						}
+					}
+				}
+
+				SCANcontroller.refineTerrainRange(body, hMin, hMax);
+
 				tempHeightMap = null;
 				SCANUtil.SCANlog("Height Map Of [{0}] Completed...", body.bodyName);
 				return;
