@@ -1106,6 +1106,57 @@ namespace SCANsat.SCAN_Map
 			return true;
 		}
 
+		/// <summary>
+		/// Render this Visual map again at up to <paramref name="width"/> pixels wide into a fresh
+		/// RenderTexture (caller releases it), for PNG export. Only Visual is texture-backed, so only
+		/// Visual gains anything from a larger render; the source mip is raised to match. Returns null
+		/// when that does not apply or the request is not larger than the on-screen map.
+		/// </summary>
+		internal RenderTexture renderVisualExport(int width)
+		{
+			if (mType != mapType.Visual || !gpuRendered || compositeMaterial == null || body == null || SCANcontroller.controller == null)
+			{
+				return null;
+			}
+
+			int w = Mathf.Min(width, 16384);
+
+			if (w <= mapwidth || mapwidth <= 0)
+			{
+				return null;
+			}
+
+			double k = (double)w / mapwidth;
+			int h = Mathf.Max(1, Mathf.RoundToInt((float)(mapheight * k)));
+			int sourceWidth = Mathf.CeilToInt((float)(mapscale * k * 360.0));
+
+			if (!SCANcontroller.controller.getVisualSource(body, sourceWidth, out Texture colorTex, out Texture normalTex, out int normalYChannel, out _))
+			{
+				return null;
+			}
+
+			RenderTexture rt = new RenderTexture(w, h, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
+			rt.wrapMode = TextureWrapMode.Clamp;
+			rt.Create();
+
+			// Same window, k times the pixels: scale the size and the pixels-per-degree together. Every
+			// other uniform is still set from the last on-screen render; the next tryRenderGPU resets
+			// all of them, so nothing here needs restoring.
+			compositeMaterial.SetTexture("_ScaledColor", colorTex);
+			compositeMaterial.SetTexture("_ScaledNormal", normalTex);
+			compositeMaterial.SetFloat("_HasNormal", normalTex != null ? 1f : 0f);
+			compositeMaterial.SetFloat("_NormalYChannel", normalYChannel);
+			compositeMaterial.SetFloat("_MapWidth", w);
+			compositeMaterial.SetFloat("_MapHeight", h);
+			compositeMaterial.SetFloat("_MapScale", (float)(mapscale * k));
+			compositeMaterial.SetFloat("_SweepY", 1f);
+
+			Graphics.Blit(null, rt, compositeMaterial);
+
+			SCANUtil.SCANlog("[{0}] Visual export rendered at {1}x{2} (on-screen {3}x{4})", body.bodyName, w, h, mapwidth, mapheight);
+			return rt;
+		}
+
 		// Uploads the coverage bitmask as a 360x180 texture the composite shader samples as a
 		// per-pixel stencil: R=VisualHiRes, G=VisualLoRes, B=ResourceHiRes, A=ResourceLoRes.
 		// GPU mode data helpers:
@@ -1213,7 +1264,32 @@ namespace SCANsat.SCAN_Map
 			h = h * 31 + lat_offset.GetHashCode();
 			h = h * 31 + centeredLat.GetHashCode();
 			h = h * 31 + centeredLong.GetHashCode();
+			// Coverage growth (live scanning) must defeat the instant-recolour shortcut: the cached data
+			// textures hold no samples for newly covered pixels - they upload as 0 m, which the LoRes
+			// grey ramp draws nearly black. A real pass samples just the new pixels. 64,800 shorts, per reset.
+			h = h * 31 + coverageChecksum();
 			return h;
+		}
+
+		private int coverageChecksum()
+		{
+			if (data == null || data.Coverage == null)
+			{
+				return 0;
+			}
+
+			Int16[,] cov = data.Coverage;
+			int sum = 0;
+
+			for (int x = 0; x < 360; x++)
+			{
+				for (int y = 0; y < 180; y++)
+				{
+					sum = unchecked(sum + cov[x, y]);
+				}
+			}
+
+			return sum;
 		}
 
 		// Ensure the mode's R-float data texture exists (cleared to 0). Rows are then uploaded

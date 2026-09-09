@@ -61,7 +61,10 @@ namespace SCANsat.SCAN_Map
 
 			if (map.GpuRendered && map.VisualRenderTexture != null)
 			{
-				RenderTexture rt = map.VisualRenderTexture;
+				// Visual is texture-backed, so it can be exported above the on-screen size (VisualExportWidth);
+				// the data-backed modes are sampled per map pixel and export as rendered.
+				RenderTexture hiRes = map.renderVisualExport(SCAN_Settings_Config.Instance.VisualExportWidth);
+				RenderTexture rt = hiRes != null ? hiRes : map.VisualRenderTexture;
 				RenderTexture prev = RenderTexture.active;
 				RenderTexture.active = rt;
 				exportTexture = new Texture2D(rt.width, rt.height, TextureFormat.ARGB32, false);
@@ -69,6 +72,12 @@ namespace SCANsat.SCAN_Map
 				exportTexture.Apply();
 				RenderTexture.active = prev;
 				tempExportTexture = true;
+
+				if (hiRes != null)
+				{
+					hiRes.Release();
+					UnityEngine.Object.Destroy(hiRes);
+				}
 			}
 
 			if (exportTexture == null)
