@@ -36,6 +36,17 @@ namespace SCANsat.SCAN_Map
 			set { legend = value; }
 		}
 
+		// Legend bars are stretched far wider than their texel count. Clamp stops the bilinear
+		// filter from bleeding the wrapped-around first texel into the last one (stray colours at
+		// both ends); Point keeps discrete blocks (biomes, discrete palettes) crisp.
+		private static Texture2D newLegendTexture(int width, FilterMode filter)
+		{
+			Texture2D t = new Texture2D(width, 1, TextureFormat.RGB24, false);
+			t.wrapMode = TextureWrapMode.Clamp;
+			t.filterMode = filter;
+			return t;
+		}
+
 		public Texture2D getLegend(bool color, SCANterrainConfig terrain)
 		{
 			if (legend != null && legendMin == terrain.MinTerrain && legendMax == terrain.MaxTerrain && legendScheme == color && terrain.ColorPal.Hash == dataPalette.Hash)
@@ -46,7 +57,7 @@ namespace SCANsat.SCAN_Map
 			body = null;
 
 			if (legend != null) UnityEngine.Object.Destroy(legend);
-			legend = new Texture2D(256, 1, TextureFormat.RGB24, false);
+			legend = newLegendTexture(256, FilterMode.Bilinear);
 			legendMin = terrain.MinTerrain;
 			legendMax = terrain.MaxTerrain;
 			legendScheme = color;
@@ -70,7 +81,7 @@ namespace SCANsat.SCAN_Map
 			}
 
 			if (legend != null) UnityEngine.Object.Destroy(legend);
-			legend = new Texture2D(256, 1, TextureFormat.RGB24, false);
+			legend = newLegendTexture(256, FilterMode.Bilinear);
 			legendMin = min;
 			legendMax = max;
 			legendScheme = color;
@@ -96,7 +107,7 @@ namespace SCANsat.SCAN_Map
 			dataPalette = new SCANPalette();
 
 			if (legend != null) UnityEngine.Object.Destroy(legend);
-			legend = new Texture2D(256, 1, TextureFormat.RGB24, false);
+			legend = newLegendTexture(256, FilterMode.Point);
 			body = data.Body;
 			legendScheme = color;
 			stockScheme = stock;
@@ -133,7 +144,7 @@ namespace SCANsat.SCAN_Map
 
 		public static Texture2D getStaticLegend(SCANterrainConfig terrain)
 		{
-			Texture2D t = new Texture2D(256, 1, TextureFormat.RGB24, false);
+			Texture2D t = newLegendTexture(256, FilterMode.Bilinear);
 			Color32[] pix = new Color32[256];
 			for (int x = 0; x < 256; ++x)
 			{
@@ -147,7 +158,7 @@ namespace SCANsat.SCAN_Map
 
 		public static Texture2D getStaticLegend(float max, float min, float range, float? clamp, bool discrete, Color32[] c)
 		{
-			Texture2D t = new Texture2D(128, 1, TextureFormat.RGB24, false);
+			Texture2D t = newLegendTexture(128, discrete ? FilterMode.Point : FilterMode.Bilinear);
 			Color32[] pix = new Color32[128];
 			for (int x = 0; x < 128; x++)
 			{
