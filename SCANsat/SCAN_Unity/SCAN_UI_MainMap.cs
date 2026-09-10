@@ -1059,6 +1059,7 @@ namespace SCANsat.SCAN_Unity
 			visualMap.setProjection(MapProjection.Rectangular);
 			visualMap.setSize(360, 180);
 			visualMap.MType = mapType.Visual;
+			visualMap.CosmeticSweep = false;   // live display: one full Blit per pass, no scanline, like the classic small map
 			visualMap.setBody(v.mainBody);
 		}
 

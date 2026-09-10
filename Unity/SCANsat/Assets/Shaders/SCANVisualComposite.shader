@@ -112,7 +112,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 
 			// Cosmetic sweep reveal (matches the CPU modes' line-by-line render look).
 			float _SweepY;                 // revealed fraction in texture-row space (uv.y). >=1 = done, no redline.
-			float4 _MapBackgroundColor;    // unrevealed rows
+			float4 _MapBackgroundColor;    // unused since the no-clear sweep; kept so the C# side can still set it
 			float4 _RedlineColor;          // the advancing scanline colour
 
 			static const float SCAN_PI = 3.14159265358979;
@@ -404,13 +404,14 @@ Shader "Hidden/SCANsat/VisualComposite"
 						col.rgb = lerp(col.rgb, float3(0.0, 0.0, 0.0), 0.5);
 				}
 
-				// Cosmetic sweep reveal (unchanged): rows ahead of the scanline drawn as background,
-				// the frontier as a redline. Matches the CPU modes' row order.
+				// Cosmetic sweep reveal: rows ahead of the scanline are left untouched (discard keeps the
+				// RenderTexture's previous contents, as the CPU path overwrote its Texture2D row by row
+				// without clearing it first - no map clears before scanning), the frontier is a redline.
 				if (_SweepY < 1.0)
 				{
 					float band = 2.0 / _MapHeight;
 					if (i.uv.y > _SweepY)
-						col = _MapBackgroundColor;
+						discard;
 					else if (i.uv.y > _SweepY - band)
 						col = _RedlineColor;
 				}

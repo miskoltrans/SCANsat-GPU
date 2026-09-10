@@ -738,6 +738,16 @@ namespace SCANsat.SCAN_Map
 		// isMapComplete so the pump keeps re-compositing until the reveal finishes.
 		private bool gpuSweepDone;
 		private int sweepStep;
+		// False for a live display (the small main map): every pass is one fully revealed Blit with
+		// no scanline, like the classic small map. The pass cadence (sweepStep) is unchanged, so the
+		// coverage stencil is still refreshed once per pass rather than every frame.
+		private bool cosmeticSweep = true;
+
+		internal bool CosmeticSweep
+		{
+			get { return cosmeticSweep; }
+			set { cosmeticSweep = value; }
+		}
 
 		/* MAP: nearly trivial functions */
 		public void setBody(CelestialBody b)
@@ -1044,6 +1054,7 @@ namespace SCANsat.SCAN_Map
 
 				visualRenderTex = new RenderTexture(mapwidth, mapheight, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
 				visualRenderTex.wrapMode = TextureWrapMode.Clamp;
+				clearGpuRenderTex();   // rows ahead of the sweep show whatever the RT holds, so start it on background
 			}
 
 			updateCoverageFlags();
@@ -1082,8 +1093,9 @@ namespace SCANsat.SCAN_Map
 
 			// Advance the cosmetic scanline one row per call, matching the CPU path's one-line-
 			// per-call cadence (mapstep++). We re-composite with the reveal fraction each call so
-			// the RawImage - already pointed at visualRenderTex - animates in place. Same background
-			// colour the CPU path clears to (SCANmap.cs getPartialMap map-init), redline = palette.Red.
+			// the RawImage - already pointed at visualRenderTex - animates in place. Rows ahead of the
+			// line keep the previous pass (shader discard); the RT was filled with the background only
+			// when created, like the CPU path's fresh Texture2D. Redline = palette.Red.
 			if (mType == mapType.Visual && !gpuSweepDone)
 			{
 				sweepStep++;
@@ -1096,7 +1108,7 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetColor("_MapBackgroundColor", background);
 			compositeMaterial.SetColor("_RedlineColor", palette.Red);
 			float gpuSweepRow = mType == mapType.Visual ? sweepStep : mapstep + 1;
-				compositeMaterial.SetFloat("_SweepY", mapheight > 0 ? Mathf.Clamp01(gpuSweepRow / mapheight) : 1f);
+			compositeMaterial.SetFloat("_SweepY", cosmeticSweep && mapheight > 0 ? Mathf.Clamp01(gpuSweepRow / mapheight) : 1f);
 
 			Graphics.Blit(null, visualRenderTex, compositeMaterial);
 
@@ -1174,14 +1186,23 @@ namespace SCANsat.SCAN_Map
 				if (visualRenderTex != null) { visualRenderTex.Release(); UnityEngine.Object.Destroy(visualRenderTex); }
 				visualRenderTex = new RenderTexture(mapwidth, mapheight, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
 				visualRenderTex.wrapMode = TextureWrapMode.Clamp;
-				RenderTexture prev = RenderTexture.active;
-				RenderTexture.active = visualRenderTex;
-				Color bg = SCAN_Settings_Config.Instance.MapBackgroundColor;
-				bg.a *= SCAN_Settings_Config.Instance.BackgroundTransparency;
-				GL.Clear(false, true, bg);
-				RenderTexture.active = prev;
+				clearGpuRenderTex();
 			}
 			gpuRendered = true;
+		}
+
+		// Fill the RenderTexture with the map background, as the CPU path fills a freshly created
+		// Texture2D. Creation and resize only: a pass overwrites rows under the scanline and leaves
+		// the rest standing (the shader discards ahead of the sweep), which is how every map behaved
+		// on the CPU - nothing is cleared before scanning.
+		private void clearGpuRenderTex()
+		{
+			RenderTexture prev = RenderTexture.active;
+			RenderTexture.active = visualRenderTex;
+			Color bg = SCAN_Settings_Config.Instance.MapBackgroundColor;
+			bg.a *= SCAN_Settings_Config.Instance.BackgroundTransparency;
+			GL.Clear(false, true, bg);
+			RenderTexture.active = prev;
 		}
 
 		// Per-mode data textures + uniforms for tryRenderGPU. Visual's ScaledSpace textures are set by
