@@ -728,7 +728,8 @@ namespace SCANsat.SCAN_Map
 			private bool resourceCacheReady;   // resourceCache is built this reset (by the prep loop or the lazy GPU build)
 			private int paletteLUTHash;
 			private bool gpuDataComplete;   // the non-Visual data cache is fully sampled for gpuDataHash's config
-			private int gpuDataHash;        // config (body/mode/projection/size/offsets) the cached data is valid for
+			private int gpuDataHash;        // config (body/mode/projection/size/offsets/coverage) the cached data is valid for
+			private int pendingDataHash;    // the config hash taken when the current build started; becomes gpuDataHash when it completes
 			private bool gpuRecolorSweep;   // cosmetic re-sweep in progress: re-Blit cached data with a new LUT (no re-sample)
 		// The GPU compositor draws the whole Visual map in one Blit; the scanline is a purely cosmetic
 		// reveal (in the CPU path's row order) so it matches the CPU modes' look. Visual and the
@@ -885,22 +886,34 @@ namespace SCANsat.SCAN_Map
 			// (a colourisation-only change - palette/clamp/terminator - leaves the config hash the same),
 			// skip the re-sweep. Jump to the last row so the next getPartialMap re-Blits once with the
 			// rebuilt LUT over the cached data textures instead of re-sampling PQS across the whole map.
-			if (gpuDataComplete && gpuDataHash == gpuConfigHash() && willRenderGPU(mType)
-				&& !(resourceActive && SCANconfigLoader.GlobalResource && resource != null)   // resource maps need the prep to rebuild resourceCache (resetResourceMap clears it)
-				&& (mType == mapType.Altimetry || mType == mapType.Slope || mType == mapType.Biome))
+			bool dataMode = mType == mapType.Altimetry || mType == mapType.Slope || mType == mapType.Biome;
+
+			if (dataMode && willRenderGPU(mType))
 			{
-				mapstep = 0;               // replay the sweep from the top...
-				gpuRendered = true;
-				gpuSweepDone = false;
-				gpuRecolorSweep = true;    // ...re-Blitting the cached data with the rebuilt LUT (charm, no re-sample)
-				resourceTexReady = false;  // resource colours may have changed too
-			}
-			else if (willRenderGPU(mType) && (mType == mapType.Altimetry || mType == mapType.Slope || mType == mapType.Biome))
-			{
-				// A full data build starts now and overwrites the data textures row by row. Until it
-				// completes (buildGpuDataFrame sets the flag again) they hold a mix of passes, so a reset
-				// in the meantime must not take the shortcut above.
-				gpuDataComplete = false;
+				// The config hash includes a coverage checksum. A cell scanned after its row was sampled
+				// is in the next pass's stencil but not in the data (it uploads as 0 m and draws black),
+				// so a build is stamped with the coverage it STARTED from, never the coverage at its end:
+				// any growth during the pass fails this compare and forces a rebuild, which samples
+				// exactly the new cells.
+				int configHash = gpuConfigHash();
+
+				if (gpuDataComplete && gpuDataHash == configHash
+					&& !(resourceActive && SCANconfigLoader.GlobalResource && resource != null))   // resource maps need the prep to rebuild resourceCache (resetResourceMap clears it)
+				{
+					mapstep = 0;               // replay the sweep from the top...
+					gpuRendered = true;
+					gpuSweepDone = false;
+					gpuRecolorSweep = true;    // ...re-Blitting the cached data with the rebuilt LUT (charm, no re-sample)
+					resourceTexReady = false;  // resource colours may have changed too
+				}
+				else
+				{
+					// A full data build starts now and overwrites the data textures row by row. Until it
+					// completes (buildGpuDataFrame sets the flag again) they hold a mix of passes, so a
+					// reset in the meantime must not take the shortcut above.
+					gpuDataComplete = false;
+					pendingDataHash = configHash;
+				}
 			}
 		}
 
@@ -1701,7 +1714,7 @@ namespace SCANsat.SCAN_Map
 			if (builtNow)
 			{
 				gpuDataComplete = true;          // data cache fully sampled...
-				gpuDataHash = gpuConfigHash();    // ...for this config (enables instant-recolour)
+				gpuDataHash = pendingDataHash;    // ...for the coverage this build started from (see resetMap)
 				passBuildMs = (Time.realtimeSinceStartup - passBuildStart) * 1000f;
 			}
 
@@ -1745,9 +1758,10 @@ namespace SCANsat.SCAN_Map
 				tryRenderGPU();   // sets gpuSweepDone on the fully revealed Blit
 				if (gpuSweepDone)
 				{
+					// gpuDataHash stays the build's: a recolour adds no samples, so it must not claim
+					// coverage that arrived during it.
 					gpuRecolorSweep = false;
 					gpuDataComplete = true;
-					gpuDataHash = gpuConfigHash();
 					SCANUtil.SCANlog("[{0}] {1} GPU recolour pass {2}x{3}: no re-sample, sweep {4:F2} s", body.bodyName, mType, mapwidth, mapheight, Time.realtimeSinceStartup - sweepStart);
 				}
 				return;
