@@ -51,6 +51,8 @@ namespace SCANsat.SCAN_Map
 			get { return mapscale; }
 			internal set
 			{
+				if (!cache && mapscale != value)
+					clearWindowCaches();   // pixel-space caches: a new zoom level is a new window
 				mapscale = value;
 				resourceMapScale = (mapwidth / resourceMapWidth) * mapscale;
 			}
@@ -221,6 +223,8 @@ namespace SCANsat.SCAN_Map
 
 			projection = p;
 			clearBiomeRowCache();   // the biome index cache is sampled in projected pixel space
+			if (!cache)
+				clearWindowCaches();   // and so is a window map's elevation cache
 		}
 
 		internal double projectLongitude(double lon, double lat)
@@ -482,6 +486,13 @@ namespace SCANsat.SCAN_Map
 			mapheight = h;
 			startLine = start;
 			stopLine = stop == 0 ? mapheight - 1 : stop;
+			// Window-map caches, pixel space (see prepRow): the GPU data path fills them per rendered
+			// pixel, so the zoom map and RPM render Altimetry/Slope/Biome the way the big map does.
+			big_heightmap = new float[mapwidth, mapheight];
+			biome_indexmap = new float[mapwidth, mapheight];
+			biomeRowCached = new bool[mapheight];
+			gpuDataBuf = null;   // ensureDataTex sizes it
+			invalidateGpuDataCache();
 			resourceMapWidth = mapwidth;
 			resourceMapHeight = mapheight;
 			resourceCache = new float[resourceMapWidth, resourceMapHeight];
@@ -594,6 +605,9 @@ namespace SCANsat.SCAN_Map
 
 		internal void centerAround(double lon, double lat)
 		{
+			double oldLonOffset = lon_offset, oldLatOffset = lat_offset;
+			double oldCenteredLong = centeredLong, oldCenteredLat = centeredLat;
+
 			centeredLong = lon;
 			centeredLat = lat;
 
@@ -609,6 +623,11 @@ namespace SCANsat.SCAN_Map
 				lon_offset = 180 + lon - (mapwidth / mapscale) / 2;
 				lat_offset = 90 + lat - (mapheight / mapscale) / 2;
 			}
+
+			// A window map's caches are pixel space, so a moved window invalidates them. Same window
+			// (the zoom map re-centres on every reset) keeps them, which is what makes a refresh warm.
+			if (!cache && (lon_offset != oldLonOffset || lat_offset != oldLatOffset || centeredLong != oldCenteredLong || centeredLat != oldCenteredLat))
+				clearWindowCaches();
 		}
 
 		internal double scaleLatitude(double lat)
@@ -1033,13 +1052,15 @@ namespace SCANsat.SCAN_Map
 				return false;
 			switch (m)
 			{
-				case mapType.Visual: return SCAN_Settings_Config.Instance.VisibleMapsActive && SCANcontroller.controller.getVisualSource(body, visualTargetWidth(), out _, out _, out _, out _);   // the setting disables Visual maps outright (the CPU path only honoured it by accident)
-				// Altimetry/Slope/Biome need the filled CPU caches (big_heightmap / biome_indexmap),
-				// which only the cache=true map (BigMap, via setWidth) allocates + fills. ZoomMap/RPM
-				// (cache=false, setSize) keep the CPU path for these modes; Visual GPU still works there.
+				// The setting disables Visual maps outright (the CPU path only honoured it by accident). A
+				// body without a source texture still renders on the GPU: the shader draws unscanned (_HasSource).
+				case mapType.Visual: return SCAN_Settings_Config.Instance.VisibleMapsActive;
+				// The data modes need the caches: geographic for the big map (setWidth), pixel space for a
+				// window map (setSize). A body without PQS or without a biome map still renders on the GPU:
+				// the shader draws the CPU renderers' black-white static there (_NoData).
 				case mapType.Altimetry:
-				case mapType.Slope: return pqs && cache;
-				case mapType.Biome: return biomeMap && cache;
+				case mapType.Slope: return big_heightmap != null;
+				case mapType.Biome: return biome_indexmap != null;
 				default: return false;
 			}
 		}
@@ -1098,18 +1119,18 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetFloat("_SunLatCenter", (float)sunLatCenter);
 			compositeMaterial.SetFloat("_Gamma", (float)gamma);
 
-			// Data-texture addressing and the classic-renderer details the shader reproduces. The big
-			// map's elevation cache is geographic; the resource cache is pixel space whenever it was
-			// generated over the map's raw window (generateResourceCache unprojects for Orthographic, and a
-			// window map's raw window is not the globe), geographic only for a non-Orthographic big map.
-			bool windowMap = lon_offset != 0 || lat_offset != 0 || mapscale * 360.0 > mapwidth + 0.5;
-			compositeMaterial.SetFloat("_ElevPixelSpace", 0f);
-			compositeMaterial.SetFloat("_ResPixelSpace", (projection == MapProjection.Orthographic || windowMap) ? 1f : 0f);
+			// Data-texture addressing and the classic-renderer details the shader reproduces. cache=true
+			// is the big map: its elevation cache is geographic over the globe. cache=false is a window
+			// map (zoom, RPM, the small map's helper): pixel-space caches filled per rendered pixel. The
+			// resource cache is pixel space whenever generateResourceCache ran over the map's raw window
+			// (it unprojects for Orthographic, and a window map's raw window is not the globe).
+			compositeMaterial.SetFloat("_ElevPixelSpace", cache ? 0f : 1f);
+			compositeMaterial.SetFloat("_ResPixelSpace", (!cache || projection == MapProjection.Orthographic) ? 1f : 0f);
 			compositeMaterial.SetFloat("_RowMin", startLine);
 			compositeMaterial.SetFloat("_RowMax", stopLine);
 			compositeMaterial.SetFloat("_Grid", 0f);
 			compositeMaterial.SetFloat("_HasSource", colorTex != null ? 1f : 0f);
-			compositeMaterial.SetFloat("_NoData", 0f);
+			compositeMaterial.SetFloat("_NoData", gpuNoData() ? 1f : 0f);
 			compositeMaterial.SetFloat("_NoiseSeed", noiseSeed);
 			compositeMaterial.SetFloat("_SweepBand", 2f);
 
@@ -1331,6 +1352,8 @@ namespace SCANsat.SCAN_Map
 			h = h * 31 + (int)mType;
 			h = h * 31 + (int)projection;
 			h = h * 31 + mapwidth;
+			h = h * 31 + mapheight;
+			h = h * 31 + mapscale.GetHashCode();   // a window map's zoom level
 			h = h * 31 + lon_offset.GetHashCode();
 			h = h * 31 + lat_offset.GetHashCode();
 			h = h * 31 + centeredLat.GetHashCode();
@@ -1540,6 +1563,31 @@ namespace SCANsat.SCAN_Map
 				System.Array.Clear(biomeRowCached, 0, biomeRowCached.Length);
 		}
 
+		// A window map's (cache=false) elevation and biome caches are in pixel space, valid for one
+		// window: body, size, projection, centre and zoom. Any of those changing drops them.
+		private void clearWindowCaches()
+		{
+			if (big_heightmap != null)
+				System.Array.Clear(big_heightmap, 0, big_heightmap.Length);
+			clearBiomeRowCache();
+			gpuDataComplete = false;
+		}
+
+		// Bodies the CPU renderers drew as black-white static: no PQS for Altimetry/Slope, no biome
+		// map for Biome. The shader does the same (_NoData); there is nothing to build for them.
+		private bool gpuNoData()
+		{
+			if (mType == mapType.Biome)
+				return !biomeMap;
+			return (mType == mapType.Altimetry || mType == mapType.Slope) && !pqs;
+		}
+
+		// One CPU budget per frame shared by every map that is building (the big map, the zoom map and
+		// the small map can all be open at once): each takes what is left, and always at least one
+		// step, so all of them progress and together they cost what the setting says.
+		private static int budgetFrame = -1;
+		private static long budgetUsedTicks;
+
 		private void prepRow()
 		{
 			bool mapHidden = mapstep < startLine || mapstep > stopLine;
@@ -1568,13 +1616,30 @@ namespace SCANsat.SCAN_Map
 
 				if (mType != mapType.Visual)
 				{
-					if (body.pqsController != null && cache && mapstep + 1 < mapheight)
+					int lookAhead = mapstep + 1;
+					bool lookAheadHidden = lookAhead < startLine || lookAhead > stopLine;   // RPM reserved rows: the shader draws them clear
+
+					if (body.pqsController != null && big_heightmap != null && lookAhead < mapheight && !lookAheadHidden)
 					{
-						if (big_heightmap[i, mapstep + 1] == 0f)
+						if (big_heightmap[i, lookAhead] == 0f)
 						{
-							if (SCANUtil.isCovered(lon, cacheLat, data, SCANtype.Altimetry))
+							// The big map's cache (cache=true) is geographic: its raw grid is the globe, so the raw
+							// coords are the sample coords and the shader reads it through the unprojected lon/lat.
+							// A window map's cache is pixel space: sample at this pixel's unprojected coordinate,
+							// which is where the shader (pixel uv) expects it.
+							double sampleLon = lon, sampleLat = cacheLat;
+							bool onMap = true;
+
+							if (!cache)
 							{
-								terrainHeightToArray(lon, cacheLat, i, mapstep + 1);
+								sampleLat = unprojectLatitude(lon, cacheLat);
+								sampleLon = unprojectLongitude(lon, cacheLat);
+								onMap = !(double.IsNaN(sampleLat) || double.IsNaN(sampleLon) || sampleLat < -90 || sampleLat > 90 || sampleLon < -180 || sampleLon > 180);
+							}
+
+							if (onMap && SCANUtil.isCovered(sampleLon, sampleLat, data, SCANtype.Altimetry))
+							{
+								terrainHeightToArray(sampleLon, sampleLat, i, lookAhead);
 							}
 						}
 					}
@@ -1650,11 +1715,19 @@ namespace SCANsat.SCAN_Map
 		private void buildGpuDataFrame()
 		{
 			long start = System.Diagnostics.Stopwatch.GetTimestamp();
-			long budget = (long)(gpuBuildBudgetMs() * System.Diagnostics.Stopwatch.Frequency / 1000.0);
+			if (budgetFrame != Time.frameCount)
+			{
+				budgetFrame = Time.frameCount;
+				budgetUsedTicks = 0;
+			}
+			long budget = (long)(gpuBuildBudgetMs() * System.Diagnostics.Stopwatch.Frequency / 1000.0) - budgetUsedTicks;
 			bool elevDirty = false, biomeDirty = false, builtNow = false;
 
 			if (mapstep < -1)
 				mapstep = -1;   // the -2 step is the CPU path's resource cache build
+
+			if (gpuNoData() && mapstep < mapheight)
+				mapstep = mapheight;   // nothing to build; the shader draws static and the sweep runs on its own
 
 			if (biomeRowCached == null || biomeRowCached.Length != mapheight)
 				biomeRowCached = new bool[mapheight];
@@ -1706,6 +1779,8 @@ namespace SCANsat.SCAN_Map
 
 			if (elevDirty) elevationTex.Apply(false);
 			if (biomeDirty) biomeIndexTex.Apply(false);
+
+			budgetUsedTicks += System.Diagnostics.Stopwatch.GetTimestamp() - start;
 
 			if (builtNow)
 			{
