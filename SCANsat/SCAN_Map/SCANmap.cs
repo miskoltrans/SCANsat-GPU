@@ -198,6 +198,7 @@ namespace SCANsat.SCAN_Map
 
 		private void terrainHeightToArray(double lon, double lat, int ilon, int ilat)
 		{
+			passHeightSamples++;
 			float alt = 0f;
 			alt = (float)SCANUtil.getElevation(body, lon, lat);
 			if (alt == 0f)
@@ -219,6 +220,7 @@ namespace SCANsat.SCAN_Map
 			}
 
 			projection = p;
+			clearBiomeRowCache();   // the biome index cache is sampled in projected pixel space
 		}
 
 		internal double projectLongitude(double lon, double lat)
@@ -533,6 +535,7 @@ namespace SCANsat.SCAN_Map
 			/* big map caching */
 			big_heightmap = new float[mapwidth, mapheight];
 			biome_indexmap = new float[mapwidth, mapheight];
+			biomeRowCached = new bool[mapheight];
 			gpuDataBuf = new Color[mapwidth * mapheight];
 			// Just wiped big_heightmap/biome_indexmap/gpuDataBuf. mapwidth is part of gpuConfigHash so
 			// the stale claim can't match today, but the caches are empty either way - don't leave a
@@ -723,6 +726,13 @@ namespace SCANsat.SCAN_Map
 			private int biomeLUTCount;
 			private CelestialBody biomeLUTBody;
 			private float[,] biome_indexmap;
+			private bool[] biomeRowCached;   // biome_indexmap row y is fully sampled for the current body / size / projection
+			// Per-pass diagnostics, logged once when a GPU data pass completes.
+			private int passHeightSamples;
+			private int passBiomeSamples;
+			private int passBuildFrames;
+			private float passBuildStart = -1f;
+			private float passBuildMs;
 			private Color[] gpuDataBuf;
 			private Color[] gpuRowBuf;
 			private bool resourceTexReady;
@@ -770,13 +780,15 @@ namespace SCANsat.SCAN_Map
 			pqs = body.pqsController != null;
 			biomeMap = body.BiomeMap != null;
 
-			// The height cache is per body: terrain does not change at runtime, and new coverage is
-			// picked up per pixel by the "unsampled" check. So it survives same-body calls (the big map
-			// calls setBody on every open) and clears only when the body actually changes.
+			// The height and biome-index caches are per body: terrain and biomes do not change at
+			// runtime, and new coverage is picked up per pixel by the "unsampled" checks. So they
+			// survive same-body calls (the big map calls setBody on every open) and clear only when the
+			// body actually changes.
 			if (cache && bodyChanged)
 			{
 				if (big_heightmap != null)
 					System.Array.Clear(big_heightmap, 0, big_heightmap.Length);
+				clearBiomeRowCache();
 			}
 
 			if (SCANconfigLoader.GlobalResource)
@@ -844,6 +856,11 @@ namespace SCANsat.SCAN_Map
 			gpuRendered = false;
 			gpuSweepDone = false;
 			sweepStart = -1f;
+			passHeightSamples = 0;
+			passBiomeSamples = 0;
+			passBuildFrames = 0;
+			passBuildStart = -1f;
+			passBuildMs = 0f;
 			resourceTexReady = false;
 			resourceCacheReady = false;
 			coverageFlagsDirty = true;   // new pass: refresh the GPU coverage stencil once from live coverage
@@ -930,6 +947,13 @@ namespace SCANsat.SCAN_Map
 				gpuSweepDone = false;
 				gpuRecolorSweep = true;    // ...re-Blitting the cached data with the rebuilt LUT (charm, no re-sample)
 				resourceTexReady = false;  // resource colours may have changed too
+			}
+			else if (willRenderGPU(mType) && (mType == mapType.Altimetry || mType == mapType.Slope || mType == mapType.Biome))
+			{
+				// A full data build starts now and overwrites the data textures row by row. Until it
+				// completes (buildGpuDataFrame sets the flag again) they hold a mix of passes, so a reset
+				// in the meantime must not take the shortcut above.
+				gpuDataComplete = false;
 			}
 		}
 
@@ -1087,10 +1111,17 @@ namespace SCANsat.SCAN_Map
 			// RawImage - already pointed at visualRenderTex - in place. Rows ahead of the line keep the
 			// previous pass (shader discard); the RT was filled with the background only when created,
 			// like the CPU path's fresh Texture2D. Redline = palette.Red.
-			bool timedSweep = mType == mapType.Visual || gpuRecolorSweep;   // end state already known: flair, paced by time
+			// The line is paced by time (SweepDuration) but never runs ahead of the rows built: Visual and
+			// the recolour re-sweep have their end state at once, so they always get the full timed sweep;
+			// a data pass (buildGpuDataFrame) is clamped to mapstep / mapheight, so a warm cache sweeps in
+			// SweepDuration and a cold one shows the line at the real sampling pace.
 			float reveal = 1f;
 			if (mapheight > 0)
-				reveal = timedSweep ? timedSweepFraction() : Mathf.Clamp01((mapstep + 1f) / mapheight);
+			{
+				reveal = timedSweepFraction();
+				if (mType != mapType.Visual && !gpuRecolorSweep)
+					reveal = Mathf.Min(reveal, Mathf.Clamp01(mapstep / (float)mapheight));
+			}
 
 			Color background = SCAN_Settings_Config.Instance.MapBackgroundColor;
 			background.a *= SCAN_Settings_Config.Instance.BackgroundTransparency;
@@ -1101,7 +1132,7 @@ namespace SCANsat.SCAN_Map
 			Graphics.Blit(null, visualRenderTex, compositeMaterial);
 
 			gpuRendered = true;                       // DisplayTexture returns the RT during the sweep
-			if (timedSweep && reveal >= 1f)
+			if (reveal >= 1f)
 			{
 				gpuSweepDone = true;                  // that Blit was the fully revealed one (no redline)
 				mapstep = mapheight;                  // mark complete for the legacy mapstep-based checks
@@ -1315,9 +1346,8 @@ namespace SCANsat.SCAN_Map
 			return sum;
 		}
 
-		// Ensure the mode's R-float data texture exists (cleared to 0). Rows are then uploaded
-		// incrementally by uploadDataRow as the CPU prep loop fills the cache, so we never rebuild
-		// the whole texture per frame - only the newly-scanned row changes.
+		// Ensure the mode's R-float data texture exists (cleared to 0). Rows are then staged by
+		// stageDataRow as the prep fills the cache and uploaded once per frame (buildGpuDataFrame).
 		private void ensureDataTex(ref Texture2D tex)
 		{
 			if (tex != null && tex.width == mapwidth && tex.height == mapheight) return;
@@ -1331,8 +1361,9 @@ namespace SCANsat.SCAN_Map
 			tex.Apply(false);
 		}
 
-		// Upload one geographic row (src column y=row) into the data texture.
-		private void uploadDataRow(Texture2D tex, float[,] src, int row)
+		// Stage one geographic row (src column y=row) into the data texture's CPU mirror. No Apply
+		// here: Apply re-uploads the whole texture, so the caller does it once per frame.
+		private void stageDataRow(Texture2D tex, float[,] src, int row)
 		{
 			if (tex == null || src == null || row < 0 || row >= mapheight) return;
 			if (gpuRowBuf == null || gpuRowBuf.Length != mapwidth)
@@ -1340,7 +1371,6 @@ namespace SCANsat.SCAN_Map
 			for (int x = 0; x < mapwidth; x++)
 				gpuRowBuf[x] = new Color(src[x, row], 0f, 0f, 0f);
 			tex.SetPixels(0, row, mapwidth, 1, gpuRowBuf);
-			tex.Apply(false);
 		}
 
 		// Upload resourceCache (geographic resW x resH) as an R-float abundance texture (fraction 0..1).
@@ -1471,6 +1501,212 @@ namespace SCANsat.SCAN_Map
 			coverageFlagsDirty = false;
 		}
 
+		// Per-frame CPU budget for building a GPU data pass, by MapGenerationSpeed. Replaces the
+		// one-row-per-call cadence for the GPU data modes; the CPU renderer still goes by rows per call.
+		private static double gpuBuildBudgetMs()
+		{
+			switch (SCAN_Settings_Config.Instance.MapGenerationSpeed)
+			{
+				case 1: return 2.0;
+				case 3: return 8.0;
+				default: return 4.0;
+			}
+		}
+
+		// The shared CPU prep for row mapstep: the elevation look-ahead into big_heightmap (row
+		// mapstep+1, cache=true maps only) and, in Biome mode, biomeIndex / stockBiomeColor for the
+		// current row. Both renderers call it: the CPU colourize loop reads the results directly, the
+		// GPU data path stages them into the data textures.
+		private void clearBiomeRowCache()
+		{
+			if (biomeRowCached != null)
+				System.Array.Clear(biomeRowCached, 0, biomeRowCached.Length);
+		}
+
+		private void prepRow()
+		{
+			bool mapHidden = mapstep < startLine || mapstep > stopLine;
+
+			// The CPU path colourises stock biomes from stockBiomeColor and needs biomeIndex only for
+			// borders; the GPU path colourises from _BiomeLUT[biomeIndex] and never reads stockBiomeColor
+			// (only the CPU colourize loop does). So the GPU path fills biomeIndex for every pixel
+			// regardless of the border toggle - without it the GPU biome map reads index 0 everywhere and
+			// draws one flat colour - and skips getBiome, which would be a second GetAtt per pixel for nothing.
+			bool gpuBiome = willRenderGPU(mapType.Biome);
+
+			// GPU biome rows are cached in biome_indexmap (per body / size / projection, like the height
+			// cache): a row already sampled skips the per-pixel biome lookups entirely.
+			bool biomeRowDone = gpuBiome && biomeRowCached != null && mapstep >= 0 && mapstep < biomeRowCached.Length && biomeRowCached[mapstep];
+
+			for (int i = 0; i < mapwidth; i++)
+			{
+				/* Introduce altimetry check here; Use unprojected lat/long coordinates
+				 * All cached altimetry data stored in a single 2D array in rectangular format
+				 * Pull altimetry data from cache after unprojection
+				 */
+
+
+				double cacheLat = ((mapstep + 1) * 1.0f / mapscale) - 90f + lat_offset;
+				double lon = (i * 1.0f / mapscale) - 180f + lon_offset;
+
+				if (mType != mapType.Visual)
+				{
+					if (body.pqsController != null && cache && mapstep + 1 < mapheight)
+					{
+						if (big_heightmap[i, mapstep + 1] == 0f)
+						{
+							if (SCANUtil.isCovered(lon, cacheLat, data, SCANtype.Altimetry))
+							{
+								terrainHeightToArray(lon, cacheLat, i, mapstep + 1);
+							}
+						}
+					}
+				}
+
+				if (mapstep < 0)
+				{
+					continue;
+				}
+
+				if (mapHidden)
+				{
+					continue;
+				}
+
+				if (mType != mapType.Biome || !biomeMap || biomeRowDone)
+				{
+					continue;
+				}
+
+				double lat = (mapstep * 1.0f / mapscale) - 90f + lat_offset;
+				double la = lat, lo = lon;
+				lat = unprojectLatitude(lo, la);
+				lon = unprojectLongitude(lo, la);
+
+				if (double.IsNaN(lat) || double.IsNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180)
+				{
+					stockBiomeColor[i] = palette.clear;
+					biomeIndex[i] = 0;
+					continue;
+				}
+
+				if (gpuBiome || !(SCAN_Settings_Config.Instance.BigMapStockBiomes && colorMap))
+				{
+					passBiomeSamples++;
+					biomeIndex[i] = SCANUtil.getBiomeIndexFraction(body, lon, lat);
+				}
+				else
+				{
+					passBiomeSamples++;
+					stockBiomeColor[i] = SCANUtil.getBiome(body, lon, lat).mapColor;
+
+					switch (mSource)
+					{
+						case mapSource.BigMap:
+							if (SCAN_Settings_Config.Instance.BigMapBiomeBorder)
+							{
+								passBiomeSamples++;
+								biomeIndex[i] = SCANUtil.getBiomeIndexFraction(body, lon, lat);
+							}
+
+							break;
+						case mapSource.ZoomMap:
+						case mapSource.RPM:
+							if (SCAN_Settings_Config.Instance.ZoomMapBiomeBorder)
+							{
+								passBiomeSamples++;
+								biomeIndex[i] = SCANUtil.getBiomeIndexFraction(body, lon, lat);
+							}
+
+							break;
+					}
+				}
+			}
+		}
+
+		// GPU data modes (Altimetry / Slope / Biome on the cache=true big map). Builds the pass under a
+		// per-frame CPU budget instead of one row per pump call, stages the rows into the data textures
+		// and uploads each texture once, then composites once. tryRenderGPU keeps the reveal at the
+		// smaller of the timed sweep and the rows built, so a warm cache sweeps in SweepDuration and a
+		// cold one shows the line at the real sampling pace. The resource cache is not built here: the
+		// first composite builds it lazily (setModeUniforms -> buildResourceCache), as for Visual.
+		private void buildGpuDataFrame()
+		{
+			long start = System.Diagnostics.Stopwatch.GetTimestamp();
+			long budget = (long)(gpuBuildBudgetMs() * System.Diagnostics.Stopwatch.Frequency / 1000.0);
+			bool elevDirty = false, biomeDirty = false, builtNow = false;
+
+			if (mapstep < -1)
+				mapstep = -1;   // the -2 step is the CPU path's resource cache build
+
+			if (biomeRowCached == null || biomeRowCached.Length != mapheight)
+				biomeRowCached = new bool[mapheight];
+
+			if (mapstep < mapheight)
+			{
+				if (passBuildStart < 0f)
+					passBuildStart = Time.realtimeSinceStartup;
+				passBuildFrames++;
+			}
+
+			// At least one step per frame, however long it takes, then as many as fit the budget.
+			while (mapstep < mapheight)
+			{
+				prepRow();   // at mapstep -1 this is the look-ahead that fills big_heightmap row 0
+
+				if (mapstep >= 0)
+				{
+					// Altimetry/Slope: big_heightmap row mapstep+1 is the look-ahead just filled (row 0 came
+					// at mapstep -1, so stage both at mapstep 0). Biome: biomeIndex is the current row - or,
+					// for a cached row, biome_indexmap already holds it - plus the elevation rows for its underlay.
+					if (mType == mapType.Biome)
+					{
+						if (!biomeRowCached[mapstep])
+						{
+							for (int bi = 0; bi < mapwidth; bi++)
+								biome_indexmap[bi, mapstep] = (float)biomeIndex[bi];
+							biomeRowCached[mapstep] = true;
+						}
+						ensureDataTex(ref biomeIndexTex);
+						stageDataRow(biomeIndexTex, biome_indexmap, mapstep);
+						biomeDirty = true;
+					}
+					ensureDataTex(ref elevationTex);
+					if (mapstep == 0) stageDataRow(elevationTex, big_heightmap, 0);
+					stageDataRow(elevationTex, big_heightmap, mapstep + 1);
+					elevDirty = true;
+				}
+
+				mapstep++;
+				if (mapstep >= mapheight)
+				{
+					builtNow = true;
+					break;
+				}
+				if (System.Diagnostics.Stopwatch.GetTimestamp() - start >= budget)
+					break;
+			}
+
+			if (elevDirty) elevationTex.Apply(false);
+			if (biomeDirty) biomeIndexTex.Apply(false);
+
+			if (builtNow)
+			{
+				gpuDataComplete = true;          // data cache fully sampled...
+				gpuDataHash = gpuConfigHash();    // ...for this config (enables instant-recolour)
+				passBuildMs = (Time.realtimeSinceStartup - passBuildStart) * 1000f;
+			}
+
+			tryRenderGPU();   // reveal = min(timed sweep, mapstep / mapheight); sets gpuSweepDone at 1
+
+			if (gpuSweepDone && passBuildStart >= 0f)
+			{
+				SCANUtil.SCANlog("[{0}] {1} GPU pass {2}x{3}: build {4} frames / {5:F0} ms ({6} height samples, {7} biome lookups), pass total {8:F2} s",
+					body.bodyName, mType, mapwidth, mapheight, passBuildFrames, passBuildMs, passHeightSamples, passBiomeSamples, Time.realtimeSinceStartup - passBuildStart);
+				passBuildStart = -1f;   // one line per pass
+			}
+		}
+
 		/* MAP: build: map to Texture2D */
 		internal Texture2D getPartialMap(bool apply = true)
 		{
@@ -1490,7 +1726,7 @@ namespace SCANsat.SCAN_Map
 
 			// Non-Visual GPU modes: point DisplayTexture at the RenderTexture up-front so the RawImage
 			// tracks the GPU output on the same frame the UI consumes updateMap (the real data render
-			// happens in the non-Visual branch below, after the prep loop fills the caches).
+			// happens in buildGpuDataFrame, on the apply call, after the prep fills the caches).
 			if (mType != mapType.Visual && !gpuRendered && willRenderGPU(mType))
 				primeGpuRenderTex();
 
@@ -1506,7 +1742,18 @@ namespace SCANsat.SCAN_Map
 					gpuRecolorSweep = false;
 					gpuDataComplete = true;
 					gpuDataHash = gpuConfigHash();
+					SCANUtil.SCANlog("[{0}] {1} GPU recolour pass {2}x{3}: no re-sample, sweep {4:F2} s", body.bodyName, mType, mapwidth, mapheight, Time.realtimeSinceStartup - sweepStart);
 				}
+				return map;
+			}
+
+			// GPU data modes (Altimetry / Slope / Biome on the big map): budgeted build plus one composite
+			// per frame, on the pump's apply call. Nothing below this runs for them: no CPU map texture,
+			// no colourize loop.
+			if (mType != mapType.Visual && willRenderGPU(mType))
+			{
+				if (apply)
+					buildGpuDataFrame();
 				return map;
 			}
 
@@ -1518,27 +1765,20 @@ namespace SCANsat.SCAN_Map
 			Color unscanned = SCAN_Settings_Config.Instance.UnscannedColor;
 			unscanned.a *= SCAN_Settings_Config.Instance.UnscannedTransparency;
 
-			// GPU non-Visual modes composite into visualRenderTex and never colourise the CPU map,
-			// so skip its ~4 MB Texture2D + the background fill; the sweep uses mapwidth/mapheight.
-			bool gpuNonVisual = mType != mapType.Visual && willRenderGPU(mType);
-
 			if (map == null)
 			{
-				if (!gpuNonVisual)
+				map = new Texture2D(mapwidth, mapheight, TextureFormat.ARGB32, false);
+				pix = map.GetPixels32();
+				Color background = SCAN_Settings_Config.Instance.MapBackgroundColor;
+				background.a *= SCAN_Settings_Config.Instance.BackgroundTransparency;
+				for (int i = 0; i < pix.Length; ++i)
 				{
-					map = new Texture2D(mapwidth, mapheight, TextureFormat.ARGB32, false);
-					pix = map.GetPixels32();
-					Color background = SCAN_Settings_Config.Instance.MapBackgroundColor;
-					background.a *= SCAN_Settings_Config.Instance.BackgroundTransparency;
-					for (int i = 0; i < pix.Length; ++i)
-					{
-						pix[i] = background;
-					}
-
-					map.SetPixels32(pix);
-					mapline = new double[mapwidth];
-					pix = new Color32[mapwidth];
+					pix[i] = background;
 				}
+
+				map.SetPixels32(pix);
+				mapline = new double[mapwidth];
+				pix = new Color32[mapwidth];
 			}
 			else if (mapstep >= mapheight)
 			{
@@ -1580,136 +1820,11 @@ namespace SCANsat.SCAN_Map
 				}
 			}
 
-			// The CPU path colourises stock biomes from stockBiomeColor and needs biomeIndex only for
-			// borders; the GPU path colourises from _BiomeLUT[biomeIndex] and never reads stockBiomeColor
-			// (only the CPU colourize loop does). So the GPU path fills biomeIndex for every pixel
-			// regardless of the border toggle - without it the GPU biome map reads index 0 everywhere and
-			// draws one flat colour - and skips getBiome, which would be a second GetAtt per pixel for nothing.
-			bool gpuBiome = willRenderGPU(mapType.Biome);
-
-			for (int i = 0; i < mapwidth; i++)
-			{
-				/* Introduce altimetry check here; Use unprojected lat/long coordinates
-				 * All cached altimetry data stored in a single 2D array in rectangular format
-				 * Pull altimetry data from cache after unprojection
-				 */
-
-
-				double cacheLat = ((mapstep + 1) * 1.0f / mapscale) - 90f + lat_offset;
-				double lon = (i * 1.0f / mapscale) - 180f + lon_offset;
-
-				if (mType != mapType.Visual)
-				{
-					if (body.pqsController != null && cache && mapstep + 1 < mapheight)
-					{
-						if (big_heightmap[i, mapstep + 1] == 0f)
-						{
-							if (SCANUtil.isCovered(lon, cacheLat, data, SCANtype.Altimetry))
-							{
-								terrainHeightToArray(lon, cacheLat, i, mapstep + 1);
-							}
-						}
-					}
-				}
-
-				if (mapstep < 0)
-				{
-					continue;
-				}
-
-				if (mapHidden)
-				{
-					continue;
-				}
-
-				if (mType != mapType.Biome || !biomeMap)
-				{
-					continue;
-				}
-
-				double lat = (mapstep * 1.0f / mapscale) - 90f + lat_offset;
-				double la = lat, lo = lon;
-				lat = unprojectLatitude(lo, la);
-				lon = unprojectLongitude(lo, la);
-
-				if (double.IsNaN(lat) || double.IsNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180)
-				{
-					stockBiomeColor[i] = palette.clear;
-					biomeIndex[i] = 0;
-					continue;
-				}
-
-				if (gpuBiome || !(SCAN_Settings_Config.Instance.BigMapStockBiomes && colorMap))
-				{
-					biomeIndex[i] = SCANUtil.getBiomeIndexFraction(body, lon, lat);
-				}
-				else
-				{
-					stockBiomeColor[i] = SCANUtil.getBiome(body, lon, lat).mapColor;
-
-					switch (mSource)
-					{
-						case mapSource.BigMap:
-							if (SCAN_Settings_Config.Instance.BigMapBiomeBorder)
-							{
-								biomeIndex[i] = SCANUtil.getBiomeIndexFraction(body, lon, lat);
-							}
-
-							break;
-						case mapSource.ZoomMap:
-						case mapSource.RPM:
-							if (SCAN_Settings_Config.Instance.ZoomMapBiomeBorder)
-							{
-								biomeIndex[i] = SCANUtil.getBiomeIndexFraction(body, lon, lat);
-							}
-
-							break;
-					}
-				}
-			}
+			prepRow();
 
 			if (mapstep <= -1)
 			{
 				mapstep++;
-				return map;
-			}
-
-			// GPU render for the non-Visual modes: the prep loop above did the unavoidable PQS/biome
-			// sampling into the CPU caches (big_heightmap / biomeIndex); skip the CPU colourize loop,
-			// upload the data, and let the shader colourize. tryRenderGPU reads mapstep for the sweep;
-			// we advance it and flag complete like the CPU path.
-			if (mType != mapType.Visual && willRenderGPU(mType))
-			{
-				// Incrementally upload just the row(s) the prep loop above filled - not the whole
-				// texture per frame. Altimetry/Slope fill big_heightmap[.,mapstep+1] (look-ahead; row 0
-				// was filled at mapstep=-1); Biome fills biomeIndex[.] for the current row.
-				if (mType == mapType.Altimetry || mType == mapType.Slope)
-				{
-					ensureDataTex(ref elevationTex);
-					if (mapstep == 0) uploadDataRow(elevationTex, big_heightmap, 0);
-					uploadDataRow(elevationTex, big_heightmap, mapstep + 1);
-				}
-				else if (mType == mapType.Biome)
-				{
-					for (int bi = 0; bi < mapwidth; bi++)
-						biome_indexmap[bi, mapstep] = (float)biomeIndex[bi];
-					ensureDataTex(ref biomeIndexTex);
-					uploadDataRow(biomeIndexTex, biome_indexmap, mapstep);
-					ensureDataTex(ref elevationTex);   // for the biome elevation underlay
-					if (mapstep == 0) uploadDataRow(elevationTex, big_heightmap, 0);
-					uploadDataRow(elevationTex, big_heightmap, mapstep + 1);
-				}
-				// One composite per frame (the pump's apply call), plus the pass's last row so the fully
-				// revealed Blit always happens. The row uploads above still run on every call.
-				if (apply || mapstep + 1 >= mapheight)
-					tryRenderGPU();
-				mapstep++;
-				if (mapstep >= mapheight)
-				{
-					gpuSweepDone = true;
-					gpuDataComplete = true;          // data cache fully sampled...
-					gpuDataHash = gpuConfigHash();    // ...for this config (enables instant-recolour)
-				}
 				return map;
 			}
 
