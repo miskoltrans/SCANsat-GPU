@@ -2349,18 +2349,9 @@ namespace SCANsat.SCAN_Unity
 
 					int count = biomes.Count;
 
-					int blockSize = (int)Math.Truncate(256 / (count * 1d));
-
-					int current = (int)Math.Truncate((xPos * 256) / (blockSize * 1d));
-
-					if (current >= count)
-					{
-						current = count - 1;
-					}
-					else if (current < 0)
-					{
-						current = 0;
-					}
+					// Same block boundaries the legend texture is drawn with (256 / count texels each);
+					// the old truncated block size drifted off by one towards the right end.
+					int current = Mathf.Clamp((int)(xPos * count), 0, count - 1);
 
 					return Localizer.Format(biomes[current].displayname);
 				case mapType.Altimetry:
