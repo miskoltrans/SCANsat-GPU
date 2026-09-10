@@ -42,6 +42,8 @@ Shader "Hidden/SCANsat/VisualComposite"
 		_RowMin ("Row Min", Float) = 0
 		_RowMax ("Row Max", Float) = 1000000
 		_HasSource ("Has Visual Source", Float) = 1
+		_OutputAlpha ("Output Alpha", Float) = 1
+		_ResGreyBlend ("Resource Below-Range Grey Blend", Float) = 0.3
 	}
 	SubShader
 	{
@@ -135,8 +137,11 @@ Shader "Hidden/SCANsat/VisualComposite"
 			float _RowMin;
 			float _RowMax;
 
-			float _Grid;        // 1: the small map's dotted 30-degree graticule, in the pixels like the CPU small map drew it
+			float _Grid;        // 1: the small map's dotted 30-degree graticule; 2: the big map's 30-degree lines with a black outline
 			float _HasSource;   // Visual: 0 when there is no colour texture for the body -> whole map _UnscannedColor (the old CPU fallback)
+			float _BaseNone;    // 1: no base layer at all, every pixel starts as _UnscannedColor (the resource-only planet overlay)
+			float _OutputAlpha; // final multiplier on the whole colour (the terrain planet overlay is 90 percent)
+			float _ResGreyBlend;   // resource overlay: blend toward grey for below-range cells (resourceToColor32's Transparency argument)
 			float _NoData;      // 1: no terrain (Altimetry/Slope on a body without PQS) or no biome map (Biome): black-white static like the CPU renderers
 			float _NoiseSeed;   // re-rolled per pass by the C# side, so the static changes between passes rather than every frame
 
@@ -344,7 +349,11 @@ Shader "Hidden/SCANsat/VisualComposite"
 
 				float4 col = _UnscannedColor;
 
-				if (_MapMode < 0.5)             // ---- Altimetry ----
+				if (_BaseNone > 0.5)            // ---- no base layer: the resource-only planet overlay ----
+				{
+					// col stays _UnscannedColor (clear); the resource pass below draws on it
+				}
+				else if (_MapMode < 0.5)        // ---- Altimetry ----
 				{
 					if (_NoData > 0.5)
 					{
@@ -452,10 +461,10 @@ Shader "Hidden/SCANsat/VisualComposite"
 					if (resHi || resLo)
 					{
 						float ab = tex2D(_ResourceTex, resUV).r * 100.0;   // stored as fraction, *100 -> percent
-						if (resLo && !resHi)
-							ab = floor(ab / 5.0) * 5.0 + 2.5;              // LoRes 5% buckets
+						if (resLo && !resHi && ab > 0.0)
+							ab = floor(ab / 5.0) * 5.0 + 2.5;              // LoRes 5% buckets (a true zero stays zero, as resourceToColor32)
 						if (ab < _ResMinRange)
-							col = lerp(col, _GreyColor, _ResTransparency);
+							col = lerp(col, _GreyColor, _ResGreyBlend);
 						else
 						{
 							float rt = _ResMaxRange > _ResMinRange ? (ab - _ResMinRange) / (_ResMaxRange - _ResMinRange) : 0.0;
@@ -464,10 +473,24 @@ Shader "Hidden/SCANsat/VisualComposite"
 					}
 				}
 
-				// The small map's dotted 30-degree graticule (SCAN_UI_MainMap.getMapPixelColor): a white dot
-				// every 3rd pixel along each 30-degree row and column. Applied before the terminator, as there.
-				if (_Grid > 0.5)
+				if (_Grid > 1.5)
 				{
+					// The big map's graticule (was SCAN_UI_BigMap.GenerateGridMap): a one-pixel white line on
+					// every 30-degree meridian and parallel with a one-pixel black outline, in any projection,
+					// drawn where this pixel's geographic lon/lat sits within a pixel's worth of one. The
+					// derivative blows up at the dateline seam and the poles, both grid lines anyway; cap it.
+					float2 dl = min(float2(fwidth(lon), fwidth(lat)), float2(2.0, 2.0));
+					float lonD = abs(lon - 30.0 * round(lon / 30.0));
+					float latD = abs(lat - 30.0 * round(lat / 30.0));
+					if (lonD < dl.x * 0.5 || latD < dl.y * 0.5)
+						col = float4(1.0, 1.0, 1.0, 1.0);
+					else if (lonD < dl.x * 1.5 || latD < dl.y * 1.5)
+						col = float4(0.0, 0.0, 0.0, 1.0);
+				}
+				else if (_Grid > 0.5)
+				{
+					// The small map's dotted 30-degree graticule (was SCAN_UI_MainMap.getMapPixelColor): a white
+					// dot every 3rd pixel along each 30-degree row and column. Applied before the terminator, as there.
 					if ((fmod(pix.y, 30.0) < 0.5 && fmod(pix.x, 3.0) < 0.5) || (fmod(pix.x, 30.0) < 0.5 && fmod(pix.y, 3.0) < 0.5))
 						col = float4(1.0, 1.0, 1.0, 1.0);
 				}
@@ -481,7 +504,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 						col.rgb = lerp(col.rgb, float3(0.0, 0.0, 0.0), 0.5);
 				}
 
-				return col;
+				return col * _OutputAlpha;   // 1 for the windows; the terrain planet overlay fades to 90 percent (lerp toward clear)
 			}
 			ENDCG
 		}
