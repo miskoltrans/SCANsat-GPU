@@ -54,9 +54,9 @@ namespace SCANsat.SCAN_Map
 				mode += "-grey";
 			}
 
-			// GPU-rendered Visual maps live in a RenderTexture; read it back into a Texture2D for
-			// EncodeToPNG (which is Texture2D-only). CPU-rendered maps use map.Map directly.
-			Texture2D exportTexture = map.Map;
+			// Maps live in a RenderTexture; read it back into a Texture2D for EncodeToPNG (which is
+			// Texture2D-only). A map that never rendered (shader unavailable) has nothing to export.
+			Texture2D exportTexture = null;
 			bool tempExportTexture = false;
 
 			if (map.GpuRendered && map.VisualRenderTexture != null)

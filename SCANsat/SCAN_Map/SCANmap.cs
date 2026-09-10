@@ -111,18 +111,12 @@ namespace SCANsat.SCAN_Map
 			get { return mSource; }
 		}
 
-		public Texture2D Map
-		{
-			get { return map; }
-			internal set { map = value; }
-		}
-
 		// The texture to display. A GPU-rendered Visual map is a RenderTexture (accepted by
 		// RawImage.texture / Graphics.Blit); otherwise the CPU-built Texture2D. Use this for
 		// on-screen display; use Map (Texture2D) for CPU readback such as PNG export.
 		public Texture DisplayTexture
 		{
-			get { return gpuRendered && visualRenderTex != null ? (Texture)visualRenderTex : (Texture)map; }
+			get { return gpuRendered && visualRenderTex != null ? visualRenderTex : null; }
 		}
 
 		public bool GpuRendered
@@ -440,7 +434,6 @@ namespace SCANsat.SCAN_Map
 		/* MAP: scaling, centering (setting origin), translating, etc */
 		private double mapscale, lon_offset, lat_offset;
 		private int mapwidth, mapheight;
-		private Color32[] pix;
 		private bool resourceActive;
 		private float[,] resourceCache;
 		private int resourceInterpolation = 4;
@@ -449,7 +442,6 @@ namespace SCANsat.SCAN_Map
 		private double resourceMapScale = 1;
 		private bool randomEdges = true;
 		private double[] biomeIndex;
-		private Color32[] stockBiomeColor;
 		private int startLine;
 		private int stopLine;
 		double sunLonCenter;
@@ -474,9 +466,7 @@ namespace SCANsat.SCAN_Map
 			}
 
 			mapwidth = w;
-			pix = new Color32[mapwidth];
 			biomeIndex = new double[mapwidth];
-			stockBiomeColor = new Color32[mapwidth];
 			mapscale = mapwidth / 360f;
 			if (h <= 0)
 			{
@@ -499,14 +489,6 @@ namespace SCANsat.SCAN_Map
 			resourceInterpolation = interpolation;
 			resourceMapScale = resourceMapWidth / 360;
 			randomEdges = false;
-			if (map != null)
-			{
-				if (mapwidth != map.width || mapheight != map.height)
-				{
-					UnityEngine.Object.Destroy(map);
-					map = null;
-				}
-			}
 		}
 
 		internal void setWidth(int w)
@@ -530,9 +512,7 @@ namespace SCANsat.SCAN_Map
 			}
 
 			mapwidth = w;
-			pix = new Color32[w];
 			biomeIndex = new double[w];
-			stockBiomeColor = new Color32[w];
 			resourceMapHeight = SCAN_Settings_Config.Instance.ResourceMapHeight;
 			resourceMapWidth = resourceMapHeight * 2;
 			resourceInterpolation = SCAN_Settings_Config.Instance.Interpolation;
@@ -552,9 +532,6 @@ namespace SCANsat.SCAN_Map
 			// the stale claim can't match today, but the caches are empty either way - don't leave a
 			// "data is complete" flag standing behind them.
 			invalidateGpuDataCache();
-			if (map != null)
-				UnityEngine.Object.Destroy(map);
-			map = null;
 			resetMap(resourceActive);
 		}
 
@@ -564,7 +541,6 @@ namespace SCANsat.SCAN_Map
 		// The owning window's OnDestroy calls this. Safe to call more than once.
 		internal void Destroy()
 		{
-			if (map != null) { UnityEngine.Object.Destroy(map); map = null; }
 			if (coverageFlags != null) { UnityEngine.Object.Destroy(coverageFlags); coverageFlags = null; }
 			if (compositeMaterial != null) { UnityEngine.Object.Destroy(compositeMaterial); compositeMaterial = null; }
 			if (visualRenderTex != null) { visualRenderTex.Release(); UnityEngine.Object.Destroy(visualRenderTex); visualRenderTex = null; }
@@ -703,14 +679,11 @@ namespace SCANsat.SCAN_Map
 		/* MAP: internal state */
 		private mapType mType;
 		private mapSource mSource;
-		private Texture2D map; // refs above: 214,215,216,232, below, and JSISCANsatRPM.
 		private CelestialBody body = null; // all refs are below
 		private SCANresourceGlobal resource;
 		private SCANdata data;
 		private SCANmapLegend mapLegend;
 		private int mapstep; // all refs are below
-		private int mapRedStep;
-		private double[] mapline; // all refs are below
 		private bool pqs;
 		private bool biomeMap;
 		private float customMin;
@@ -721,7 +694,6 @@ namespace SCANsat.SCAN_Map
 		private bool useCustomRange;
 		private bool colorMap;
 		private bool terminator;
-		private float mapRedlineDraw = 10;
 
 		/* GPU Visual-mode compositing: renders the Visual map on the GPU sampling the body's
 		   original ScaledSpace textures, so no readable CPU copy is needed. Dormant until the
@@ -732,7 +704,7 @@ namespace SCANsat.SCAN_Map
 		private Color32[] coverageFlagsBuf;   // reused CPU buffer for coverageFlags (no per-frame alloc)
 		private bool coverageFlagsDirty = true;   // set each resetMap; rebuild the coverage texture once per pass, not per sweep row
 		private bool gpuRendered;
-		private bool visualFallbackLogged;   // one "no GPU Visual source" log per map pass
+		private bool noRenderLogged;   // one "not rendered" log per pass when no renderer applies (shader unavailable)
 			// GPU data textures for the non-Visual modes (all-modes port). Elevation/biome/resource
 			// upload from the CPU caches (big_heightmap / biome_indexmap / resourceCache); a 1-D palette
 			// LUT baked from heightToColor colourizes altimetry (legend parity). Shader branches _MapMode.
@@ -855,19 +827,10 @@ namespace SCANsat.SCAN_Map
 
 		internal bool isMapComplete()
 		{
-			if (gpuRendered)
-			{
-				// The map is composited, but hold "incomplete" until the cosmetic sweep finishes
-				// so the update pump keeps re-Blitting the advancing scanline (like the CPU path).
-				return gpuSweepDone;
-			}
-
-			if (map == null)
-			{
-				return false;
-			}
-
-			return mapstep >= map.height;
+			// Composited maps hold "incomplete" until the cosmetic sweep finishes so the pump keeps
+			// re-compositing the advancing scanline. Before the first composite of a pass (or when
+			// nothing renders this map) mapstep says whether the pass is over.
+			return gpuRendered ? gpuSweepDone : mapstep >= mapheight;
 		}
 
 		public void resetMap(bool resourceOn, bool setRes = true)
@@ -885,7 +848,7 @@ namespace SCANsat.SCAN_Map
 			resourceTexReady = false;
 			resourceCacheReady = false;
 			coverageFlagsDirty = true;   // new pass: refresh the GPU coverage stencil once from live coverage
-			visualFallbackLogged = false;
+			noRenderLogged = false;
 			resourceActive = resourceOn;
 			if (SCANconfigLoader.GlobalResource && setRes)
 			{ //Make sure that a resource is initialized if necessary
@@ -895,41 +858,6 @@ namespace SCANsat.SCAN_Map
 				}
 
 				resetResourceMap();
-			}
-
-			switch (mSource)
-			{
-				case mapSource.BigMap:
-					switch (SCAN_Settings_Config.Instance.MapGenerationSpeed)
-					{
-						case 1:
-							mapRedlineDraw = 6;
-							break;
-						case 2:
-							mapRedlineDraw = 3;
-							break;
-						case 3:
-							mapRedlineDraw = 2;
-							break;
-					}
-					break;
-				case mapSource.ZoomMap:
-					switch (SCAN_Settings_Config.Instance.MapGenerationSpeed)
-					{
-						case 1:
-							mapRedlineDraw = 6;
-							break;
-						case 2:
-							mapRedlineDraw = 3;
-							break;
-						case 3:
-							mapRedlineDraw = 2;
-							break;
-					}
-					break;
-				case mapSource.RPM:
-					mapRedlineDraw = 10;
-					break;
 			}
 
 			if (terminator)
@@ -1553,10 +1481,6 @@ namespace SCANsat.SCAN_Map
 			}
 		}
 
-		// The shared CPU prep for row mapstep: the elevation look-ahead into big_heightmap (row
-		// mapstep+1, cache=true maps only) and, in Biome mode, biomeIndex / stockBiomeColor for the
-		// current row. Both renderers call it: the CPU colourize loop reads the results directly, the
-		// GPU data path stages them into the data textures.
 		private void clearBiomeRowCache()
 		{
 			if (biomeRowCached != null)
@@ -1588,20 +1512,16 @@ namespace SCANsat.SCAN_Map
 		private static int budgetFrame = -1;
 		private static long budgetUsedTicks;
 
+		// The CPU sampling for row mapstep: the elevation look-ahead into big_heightmap (row mapstep+1)
+		// and, in Biome mode, biomeIndex for the current row. buildGpuDataFrame stages the results into
+		// the data textures; the shader does all the colourising.
 		private void prepRow()
 		{
 			bool mapHidden = mapstep < startLine || mapstep > stopLine;
 
-			// The CPU path colourises stock biomes from stockBiomeColor and needs biomeIndex only for
-			// borders; the GPU path colourises from _BiomeLUT[biomeIndex] and never reads stockBiomeColor
-			// (only the CPU colourize loop does). So the GPU path fills biomeIndex for every pixel
-			// regardless of the border toggle - without it the GPU biome map reads index 0 everywhere and
-			// draws one flat colour - and skips getBiome, which would be a second GetAtt per pixel for nothing.
-			bool gpuBiome = willRenderGPU(mapType.Biome);
-
-			// GPU biome rows are cached in biome_indexmap (per body / size / projection, like the height
+			// Biome rows are cached in biome_indexmap (per body / size / projection, like the height
 			// cache): a row already sampled skips the per-pixel biome lookups entirely.
-			bool biomeRowDone = gpuBiome && biomeRowCached != null && mapstep >= 0 && mapstep < biomeRowCached.Length && biomeRowCached[mapstep];
+			bool biomeRowDone = biomeRowCached != null && mapstep >= 0 && mapstep < biomeRowCached.Length && biomeRowCached[mapstep];
 
 			for (int i = 0; i < mapwidth; i++)
 			{
@@ -1667,42 +1587,14 @@ namespace SCANsat.SCAN_Map
 
 				if (double.IsNaN(lat) || double.IsNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180)
 				{
-					stockBiomeColor[i] = palette.clear;
 					biomeIndex[i] = 0;
 					continue;
 				}
 
-				if (gpuBiome || !(SCAN_Settings_Config.Instance.BigMapStockBiomes && colorMap))
-				{
-					passBiomeSamples++;
-					biomeIndex[i] = SCANUtil.getBiomeIndexFraction(body, lon, lat);
-				}
-				else
-				{
-					passBiomeSamples++;
-					stockBiomeColor[i] = SCANUtil.getBiome(body, lon, lat).mapColor;
-
-					switch (mSource)
-					{
-						case mapSource.BigMap:
-							if (SCAN_Settings_Config.Instance.BigMapBiomeBorder)
-							{
-								passBiomeSamples++;
-								biomeIndex[i] = SCANUtil.getBiomeIndexFraction(body, lon, lat);
-							}
-
-							break;
-						case mapSource.ZoomMap:
-						case mapSource.RPM:
-							if (SCAN_Settings_Config.Instance.ZoomMapBiomeBorder)
-							{
-								passBiomeSamples++;
-								biomeIndex[i] = SCANUtil.getBiomeIndexFraction(body, lon, lat);
-							}
-
-							break;
-					}
-				}
+				// One biome lookup per pixel: the shader colourises from _BiomeLUT[biomeIndex] (stock
+				// colours or the low/high gradient) and finds the borders in the index texture itself.
+				passBiomeSamples++;
+				biomeIndex[i] = SCANUtil.getBiomeIndexFraction(body, lon, lat);
 			}
 		}
 
@@ -1799,21 +1691,21 @@ namespace SCANsat.SCAN_Map
 			}
 		}
 
-		/* MAP: build: map to Texture2D */
-		internal Texture2D getPartialMap(bool apply = true)
+		/* MAP: build: one pump call. The UI calls this 1-4 times per frame (MapGenerationSpeed), the last
+		   with apply=true; the GPU paths act on that call only, the others are the old CPU row cadence. */
+		internal void getPartialMap(bool apply = true)
 		{
 			if (data == null)
 			{
-				return new Texture2D(1, 1);
+				return;
 			}
 
 			if (mType == mapType.Visual && willRenderGPU(mapType.Visual))
 			{
-				// One composite per frame, on the pump's apply call. The pump's extra calls per frame are
-				// the CPU path's row cadence; the GPU sweep is paced by time in tryRenderGPU, not by calls.
+				// One composite per frame, on the pump's apply call; the sweep is paced by time in tryRenderGPU.
 				if (apply)
 					tryRenderGPU();
-				return map;
+				return;
 			}
 
 			// Non-Visual GPU modes: point DisplayTexture at the RenderTexture up-front so the RawImage
@@ -1836,383 +1728,33 @@ namespace SCANsat.SCAN_Map
 					gpuDataHash = gpuConfigHash();
 					SCANUtil.SCANlog("[{0}] {1} GPU recolour pass {2}x{3}: no re-sample, sweep {4:F2} s", body.bodyName, mType, mapwidth, mapheight, Time.realtimeSinceStartup - sweepStart);
 				}
-				return map;
+				return;
 			}
 
-			// GPU data modes (Altimetry / Slope / Biome on the big map): budgeted build plus one composite
-			// per frame, on the pump's apply call. Nothing below this runs for them: no CPU map texture,
-			// no colourize loop.
+			// GPU data modes (Altimetry / Slope / Biome): budgeted build plus one composite per frame, on
+			// the pump's apply call.
 			if (mType != mapType.Visual && willRenderGPU(mType))
 			{
 				if (apply)
 					buildGpuDataFrame();
-				return map;
+				return;
 			}
 
-			System.Random r = new System.Random(ResourceScenario.Instance.gameSettings.Seed);
-
-			bool resourceOn = false;
-			bool mapHidden = mapstep < startLine || mapstep > stopLine;
-
-			Color unscanned = SCAN_Settings_Config.Instance.UnscannedColor;
-			unscanned.a *= SCAN_Settings_Config.Instance.UnscannedTransparency;
-
-			if (map == null)
+			// Nothing renders this map: the composite shader is missing or unsupported on this graphics
+			// device (SCAN_UI_Loader logged which), or Visual maps are disabled in the settings. There is
+			// no CPU renderer any more, so mark the pass complete, say so once per pass, and leave
+			// DisplayTexture null.
+			if (mapstep < mapheight)
 			{
-				map = new Texture2D(mapwidth, mapheight, TextureFormat.ARGB32, false);
-				pix = map.GetPixels32();
-				Color background = SCAN_Settings_Config.Instance.MapBackgroundColor;
-				background.a *= SCAN_Settings_Config.Instance.BackgroundTransparency;
-				for (int i = 0; i < pix.Length; ++i)
-				{
-					pix[i] = background;
-				}
+				mapstep = mapheight;
 
-				map.SetPixels32(pix);
-				mapline = new double[mapwidth];
-				pix = new Color32[mapwidth];
-			}
-			else if (mapstep >= mapheight)
-			{
-				return map;
-			}
-
-			if (palette.redline == null || palette.redline.Length != mapwidth)
-			{
-				palette.redline = new Color32[mapwidth];
-				for (int i = 0; i < palette.redline.Length; ++i)
+				if (!noRenderLogged)
 				{
-					palette.redline[i] = palette.Red;
+					noRenderLogged = true;
+					SCANUtil.SCANlog("[{0}] {1} map not rendered: composite shader unavailable{2}", body.bodyName, mType,
+						mType == mapType.Visual && !SCAN_Settings_Config.Instance.VisibleMapsActive ? " (or Visual maps disabled)" : "");
 				}
 			}
-
-			resourceOn = resourceActive && SCANconfigLoader.GlobalResource && resource != null;
-
-			if (mapstep <= -2)
-			{
-				if (resourceOn)
-				{
-					SCANuiUtil.generateResourceCache(ref resourceCache, resourceMapHeight, resourceMapWidth, resourceInterpolation, resourceMapScale, this);
-				}
-
-				mapstep++;
-				return map;
-			}
-
-			if (mapstep <= -1)
-			{
-				if (resourceOn)
-				{
-					for (int i = resourceInterpolation / 2; i >= 1; i /= 2)
-					{
-						SCANuiUtil.interpolate(resourceCache, resourceMapHeight, resourceMapWidth, i, i, i, r, randomEdges, mSource == mapSource.ZoomMap);
-						SCANuiUtil.interpolate(resourceCache, resourceMapHeight, resourceMapWidth, 0, i, i, r, randomEdges, mSource == mapSource.ZoomMap);
-						SCANuiUtil.interpolate(resourceCache, resourceMapHeight, resourceMapWidth, i, 0, i, r, randomEdges, mSource == mapSource.ZoomMap);
-					}
-				}
-			}
-
-			prepRow();
-
-			if (mapstep <= -1)
-			{
-				mapstep++;
-				return map;
-			}
-
-			for (int i = 0; i < map.width; i++)
-			{
-				if (mapHidden)
-				{
-					pix[i] = palette.Clear;
-					continue;
-				}
-
-				Color32 baseColor = palette.Grey;
-				pix[i] = baseColor;
-				float projVal = 0f;
-				bool nowColor = colorMap;
-				double lat = (mapstep * 1.0f / mapscale) - 90f + lat_offset;
-				double lon = (i * 1.0f / mapscale) - 180f + lon_offset;
-				double la = lat, lo = lon;
-				lat = unprojectLatitude(lo, la);
-				lon = unprojectLongitude(lo, la);
-
-				if (double.IsNaN(lat) || double.IsNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180)
-				{
-					pix[i] = palette.Clear;
-					continue;
-				}
-
-				switch (mType)
-				{
-					case mapType.Altimetry:
-						{
-							if (!pqs)
-							{
-								baseColor = palette.lerp(palette.Black, palette.White, UnityEngine.Random.value);
-							}
-							else if (SCANUtil.isCovered(lon, lat, data, SCANtype.Altimetry))
-							{
-								projVal = terrainElevation(lon, lat, mapwidth, mapheight, big_heightmap, cache, data, out nowColor);
-
-								if (useCustomRange)
-								{
-									baseColor = palette.heightToColor(projVal, nowColor, SCANUtil.getTerrainConfig(data), customMin, customMax, customRange, true);
-								}
-								else
-								{
-									baseColor = palette.heightToColor(projVal, nowColor, SCANUtil.getTerrainConfig(data));
-								}
-							}
-							else
-							{
-								baseColor = unscanned;
-							}
-
-							break;
-						}
-					case mapType.Slope:
-						{
-							if (!pqs)
-							{
-								baseColor = palette.lerp(palette.Black, palette.White, UnityEngine.Random.value);
-							}
-							else if (SCANUtil.isCovered(lon, lat, data, SCANtype.Altimetry))
-							{
-								projVal = terrainElevation(lon, lat, mapwidth, mapheight, big_heightmap, cache, data, out nowColor);
-								if (mapstep >= 0)
-								{
-									// This doesn't actually calculate the slope per se, but it's faster
-									// than asking for yet more elevation data. Please don't use this
-									// code to operate nuclear power plants or rockets.
-									double v1 = mapline[i];
-									if (i > 0)
-									{
-										v1 = Math.Max(v1, mapline[i - 1]);
-									}
-
-									if (i < mapline.Length - 1 && mapstep > 0)
-									{
-										v1 = Math.Max(v1, mapline[i + 1]);
-									}
-
-									float v = Mathf.Clamp((float)Math.Abs(projVal - v1) / (1000f / (float)mapscale), 0, 2f);
-									if (!colorMap)
-									{
-										baseColor = palette.lerp(palette.Black, palette.White, v / 2f);
-									}
-									else
-									{
-										if (v < SCAN_Settings_Config.Instance.SlopeCutoff)
-										{
-											baseColor = palette.lerp(SCANcontroller.controller.lowSlopeColorOne32, SCANcontroller.controller.highSlopeColorOne32, v / SCAN_Settings_Config.Instance.SlopeCutoff);
-										}
-										else
-										{
-											baseColor = palette.lerp(SCANcontroller.controller.lowSlopeColorTwo32, SCANcontroller.controller.highSlopeColorTwo32, (v - SCAN_Settings_Config.Instance.SlopeCutoff) / (2 - SCAN_Settings_Config.Instance.SlopeCutoff));
-										}
-									}
-								}
-								mapline[i] = projVal;
-							}
-							else
-							{
-								baseColor = unscanned;
-							}
-
-							break;
-						}
-					case mapType.Biome:
-						{
-							if (!biomeMap)
-							{
-								baseColor = palette.lerp(palette.Black, palette.White, UnityEngine.Random.value);
-							}
-							else if (SCANUtil.isCovered(lon, lat, data, SCANtype.Biome))
-							{
-								Color32 biome = palette.Grey;
-								if (!colorMap)
-								{
-									if ((i > 0 && mapline[i - 1] != biomeIndex[i]) || (mapstep > 0 && mapline[i] != biomeIndex[i]))
-									{
-										biome = palette.White;
-									}
-									else
-									{
-										biome = palette.lerp(palette.Black, palette.White, (float)biomeIndex[i]);
-									}
-								}
-								else
-								{
-									Color32 elevation = palette.Grey;
-									if (SCAN_Settings_Config.Instance.BiomeTransparency > 0)
-									{
-										if (!pqs)
-										{
-											elevation = palette.Grey;
-										}
-										else if (SCANUtil.isCovered(lon, lat, data, SCANtype.Altimetry))
-										{
-											projVal = terrainElevation(lon, lat, mapwidth, mapheight, big_heightmap, cache, data, out nowColor);
-											if (useCustomRange)
-											{
-												elevation = palette.lerp(palette.Black, palette.White, Mathf.Clamp(projVal + (-1f * customMin), 0, customRange) / customRange);
-											}
-											else
-											{
-												elevation = palette.lerp(palette.Black, palette.White, Mathf.Clamp(projVal + (-1f * SCANUtil.getTerrainConfig(data).MinTerrain), 0, SCANUtil.getTerrainConfig(data).TerrainRange) / SCANUtil.getTerrainConfig(data).TerrainRange);
-											}
-										}
-									}
-
-									bool border = false;
-
-									switch (mSource)
-									{
-										case mapSource.BigMap:
-											if (SCAN_Settings_Config.Instance.BigMapBiomeBorder)
-											{
-												border = true;
-											}
-
-											break;
-										case mapSource.ZoomMap:
-										case mapSource.RPM:
-											if (SCAN_Settings_Config.Instance.ZoomMapBiomeBorder)
-											{
-												border = true;
-											}
-
-											break;
-									}
-
-									if (border && ((i > 0 && mapline[i - 1] != biomeIndex[i]) || (mapstep > 0 && mapline[i] != biomeIndex[i])))
-									{
-										biome = palette.White;
-									}
-									else if (SCAN_Settings_Config.Instance.BigMapStockBiomes)
-									{
-										biome = palette.lerp(stockBiomeColor[i], elevation, SCAN_Settings_Config.Instance.BiomeTransparency);
-									}
-									else
-									{
-										biome = palette.lerp(palette.lerp(SCANcontroller.controller.lowBiomeColor32, SCANcontroller.controller.highBiomeColor32, (float)biomeIndex[i]), elevation, SCAN_Settings_Config.Instance.BiomeTransparency);
-									}
-								}
-
-								baseColor = biome;
-								mapline[i] = biomeIndex[i];
-							}
-							else
-							{
-								baseColor = unscanned;
-							}
-
-							break;
-						}
-					case mapType.Visual:
-						{
-							// Visual is GPU-only (tryRenderGPU). Reaching the CPU loop in Visual mode means
-							// there is no eligible source right now (see willRenderGPU): shader missing or
-							// unsupported, or no texture for this body. Draw unscanned rather than guess,
-							// and say so once per pass.
-							if (!visualFallbackLogged)
-							{
-								visualFallbackLogged = true;
-								SCANUtil.SCANlog("[{0}] Visual map has no GPU source (shader unavailable or no texture) - drawing unscanned", body.bodyName);
-							}
-
-							baseColor = unscanned;
-							break;
-						}
-				}
-
-				if (resourceOn)
-				{
-					float abundance = 0;
-					switch (projection)
-					{
-						case MapProjection.Rectangular:
-						case MapProjection.KavrayskiyVII:
-						case MapProjection.Polar:
-							abundance = getResoureCache(lon, lat);
-							break;
-						case MapProjection.Orthographic:
-							abundance = resourceCache[Mathf.RoundToInt(i * (resourceMapWidth / mapwidth)), Mathf.RoundToInt(mapstep * (resourceMapWidth / mapwidth))];
-							break;
-					}
-					if (useCustomRange)
-					{
-						baseColor = SCANuiUtil.resourceToColor32(baseColor, resource, customResourceMin, customResourceMax, abundance, data, lon, lat);
-					}
-					else
-					{
-						baseColor = SCANuiUtil.resourceToColor32(baseColor, resource, resource.CurrentBody.MinValue, resource.CurrentBody.MaxValue, abundance, data, lon, lat);
-					}
-				}
-
-				if (terminator)
-				{
-					double crossingLat = Math.Atan(gamma * Math.Sin(Mathf.Deg2Rad * lon - Mathf.Deg2Rad * sunLonCenter));
-
-					if (sunLatCenter >= 0)
-					{
-						if (lat < crossingLat * Mathf.Rad2Deg)
-						{
-							pix[i] = palette.lerp(baseColor, palette.Black, 0.5f);
-						}
-						else
-						{
-							pix[i] = baseColor;
-						}
-					}
-					else
-					{
-						if (lat > crossingLat * Mathf.Rad2Deg)
-						{
-							pix[i] = palette.lerp(baseColor, palette.Black, 0.5f);
-						}
-						else
-						{
-							pix[i] = baseColor;
-						}
-					}
-				}
-				else
-				{
-					pix[i] = baseColor;
-				}
-			}
-
-			if (mapstep >= 0)
-			{
-				map.SetPixels32(0, mapstep, map.width, 1, pix);
-			}
-
-			mapstep++;
-
-			if (apply)
-			{
-				mapRedStep++;
-			}
-
-			if (mapRedStep % mapRedlineDraw == 0 || mapstep >= map.height)
-			{
-				mapRedStep = 0;
-
-				if (mapstep < map.height - 1)
-				{
-					map.SetPixels32(0, mapstep, map.width, 1, palette.redline);
-				}
-
-				if (apply || mapstep >= map.height)
-				{
-					map.Apply();
-				}
-			}
-
-			return map;
 		}
 
 		/* Calculates the terrain elevation based on scanning coverage; fetches data from elevation cache if possible */
@@ -2295,26 +1837,6 @@ namespace SCANsat.SCAN_Map
 			return terrainElevation(Lon, Lat, W, H, heightMap, true, Data, out c, export);
 		}
 
-		private float getResoureCache(double Lon, double Lat)
-		{
-			double resourceLat = fixUnscale(unScaleLatitude(Lat, resourceMapScale), resourceMapHeight);
-			double resourceLon = fixUnscale(unScaleLongitude(Lon, resourceMapScale), resourceMapWidth);
-
-			int ilon = Mathf.RoundToInt((float)resourceLon);
-			int ilat = Mathf.RoundToInt((float)resourceLat);
-
-			if (ilon >= resourceMapWidth)
-			{
-				ilon = resourceMapWidth - 1;
-			}
-
-			if (ilat >= resourceMapHeight)
-			{
-				ilat = resourceMapHeight - 1;
-			}
-
-			return resourceCache[ilon, ilat];
-		}
 
 		#endregion
 
