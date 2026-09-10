@@ -33,22 +33,13 @@ namespace SCANsat.SCAN_Unity
 		private Vessel v;
 		private SCANdata data;
 		private SCANtype sensors;
-		private Texture2D map_small;
-		private SCANmap visualMap;      // Visual mode: GPU-composited (see pumpVisualMap)
+		private SCANmap visualMap;      // the small map: one 360x180 rectangular SCANmap, GPU-composited in every display mode (see pumpMap)
 		private Texture shownTexture;   // what the RawImage currently points at
-		private Color32[] cols_height_map_small;
-		private Color32[] biomeCache;
-		private bool biomeBuilding;
-		private double[] biomeIndex = new double[360];
-		private int scanline;
+		private int scanline;           // cursor of the body's 360x180 height map build when this window pumps it
 		private int scanstep;
 		private int updateInterval = 60;
 		private int lastUpdate;
 		private bool flip;
-
-		double sunLonCenter;
-		double sunLatCenter;
-		double gamma;
 
 		private SCAN_MainMap uiElement;
 
@@ -62,19 +53,6 @@ namespace SCANsat.SCAN_Unity
 		public SCAN_UI_MainMap()
 		{
 			instance = this;
-
-			map_small = new Texture2D(360, 180, TextureFormat.ARGB32, false);
-			cols_height_map_small = new Color32[360];
-			biomeCache = new Color32[360 * 180];
-
-			if (palette.small_redline == null)
-			{
-				palette.small_redline = new Color32[360];
-				for (int i = 0; i < 360; i++)
-				{
-					palette.small_redline[i] = palette.Red;
-				}
-			}
 
 			GameEvents.onVesselSOIChanged.Add(soiChange);
 			GameEvents.onVesselChange.Add(vesselChange);
@@ -92,12 +70,6 @@ namespace SCANsat.SCAN_Unity
 			{
 				uiElement.gameObject.SetActive(false);
 				MonoBehaviour.Destroy(uiElement.gameObject);
-			}
-
-			if (map_small != null)
-			{
-				GameObject.Destroy(map_small);
-				map_small = null;
 			}
 
 			destroyVisualMap();
@@ -187,21 +159,7 @@ namespace SCANsat.SCAN_Unity
 
 			sensors = SCANcontroller.controller.activeSensorsOnVessel(v.id, false);
 
-			if (SCANcontroller.controller.mainMapDisplayMode == MainMapDisplayMode.Visual)
-			{
-				pumpVisualMap();
-			}
-			else
-			{
-				showTexture(map_small);
-
-				if (SCAN_Settings_Config.Instance.MapGenerationSpeed > 1)
-				{
-					drawPartialMap(SCANcontroller.controller.mainMapDisplayMode, false);
-				}
-
-				drawPartialMap(SCANcontroller.controller.mainMapDisplayMode, true);
-			}
+			pumpMap(SCANcontroller.controller.mainMapDisplayMode);
 
 			lastUpdate++;
 
@@ -423,8 +381,7 @@ namespace SCANsat.SCAN_Unity
 
 			resetImages();
 
-			shownTexture = null;
-			showTexture(map_small);   // Visual mode re-points to the GPU texture on the first Update
+			shownTexture = null;   // the first Update re-points the RawImage at the map's RenderTexture
 
 			_isVisible = true;
 			SCANcontroller.controller.mainMapVisible = true;
@@ -854,197 +811,24 @@ namespace SCANsat.SCAN_Unity
 			return string.Format("({0}°,{1}°{2})", lat.ToString("F1"), lon.ToString("F1"), units);
 		}
 
-		private void drawPartialMap(MainMapDisplayMode display, bool apply)
+		/* The small map is one rectangular 360x180 SCANmap (mapSource.Data), composited on the GPU in
+		   every display mode: Terrain is SCANmap's Altimetry (HiRes colour ramp, LoRes grey), fed from the
+		   body's prebuilt 360x180 height map rather than PQS; Biome and Visual are SCANmap's own. The
+		   shader adds the classic small-map details for this source: grey for uncovered pixels, the
+		   dotted 30-degree graticule, no elevation underlay on biomes. */
+
+		private static mapType displayModeToMapType(MainMapDisplayMode mode)
 		{
-			bool pqsController = data.Body.pqsController != null;
-			bool biomeMap = data.Body.BiomeMap != null;
-
-			if (biomeBuilding && biomeMap && display == MainMapDisplayMode.Biome)
+			switch (mode)
 			{
-				buildBiomeCache();
-			}
-
-			if (data.ControllerBuilding || data.OverlayBuilding)
-			{
-				return;
-			}
-
-			if (!data.Built)
-			{
-				if (!data.MapBuilding)
-				{
-					scanline = 0;
-					scanstep = 0;
-				}
-
-				data.MapBuilding = true;
-				data.generateHeightMap(ref scanline, ref scanstep, 360);
-				return;
-			}
-
-			if (scanline == 0 && TerminatorToggle)
-			{
-				double sunLon = data.Body.GetLongitude(Planetarium.fetch.Sun.position, false);
-				double sunLat = data.Body.GetLatitude(Planetarium.fetch.Sun.position, false);
-
-				sunLatCenter = SCANUtil.fixLatShift(sunLat);
-
-				if (sunLatCenter >= 0)
-				{
-					sunLonCenter = SCANUtil.fixLonShift(sunLon + 90);
-				}
-				else
-				{
-					sunLonCenter = SCANUtil.fixLonShift(sunLon - 90);
-				}
-
-				gamma = Math.Abs(sunLatCenter) < 0.55 ? 100 : Math.Tan(Mathf.Deg2Rad * (90 - Math.Abs(sunLatCenter)));
-			}
-
-			for (int ilon = 0; ilon < 360; ilon++)
-			{
-				if (!pqsController)
-				{
-					cols_height_map_small[ilon] = palette.lerp(palette.black, palette.white, UnityEngine.Random.value);
-					continue;
-				}
-
-				Color32 c = getMapPixelColor(display, scanline, ilon);
-
-				if (TerminatorToggle)
-				{
-					double crossingLat = Math.Atan(gamma * Math.Sin(Mathf.Deg2Rad * (ilon - 180) - Mathf.Deg2Rad * sunLonCenter));
-
-					if (sunLatCenter >= 0)
-					{
-						if (scanline - 90 < crossingLat * Mathf.Rad2Deg)
-						{
-							c = palette.lerp(c, palette.Black, 0.5f);
-						}
-					}
-					else
-					{
-						if (scanline - 90 > crossingLat * Mathf.Rad2Deg)
-						{
-							c = palette.lerp(c, palette.Black, 0.5f);
-						}
-					}
-				}
-
-				cols_height_map_small[ilon] = c;
-			}
-
-			map_small.SetPixels32(0, scanline, 360, 1, cols_height_map_small);
-
-			if (apply)
-			{
-				if (scanline < 179)
-				{
-					map_small.SetPixels32(0, scanline + 1, 360, 1, palette.small_redline);
-				}
-			}
-
-			scanline++;
-
-			if (apply || scanline >= 180)
-			{
-				map_small.Apply();
-			}
-
-			if (scanline >= 180)
-			{
-				scanline = 0;
-			}
-		}
-
-		private Color32 getMapPixelColor(MainMapDisplayMode display, int scanline, int ilon)
-		{
-			bool pqsController = data.Body.pqsController != null;
-			bool biomeMap = data.Body.BiomeMap != null;
-			Color32 c = palette.Grey;
-			switch (display)
-			{
-				case MainMapDisplayMode.Terrain:
-					if (!pqsController)
-					{
-						c = palette.lerp(palette.black, palette.white, UnityEngine.Random.value);
-					}
-					else if (SCANUtil.isCovered(ilon, scanline, data, SCANtype.Altimetry))
-					{
-						float val = data.HeightMapValue(data.Body.flightGlobalsIndex, ilon, scanline);
-						if (SCANUtil.isCovered(ilon, scanline, data, SCANtype.AltimetryHiRes))
-						{
-							c = palette.heightToColor(val, Color, SCANUtil.getTerrainConfig(data));
-						}
-						else
-						{
-							c = palette.heightToColor(val, false, SCANUtil.getTerrainConfig(data));
-						}
-						return c;
-					}
-					break;
-
 				case MainMapDisplayMode.Biome:
-					if (!biomeMap)
-					{
-						c = palette.lerp(palette.black, palette.white, UnityEngine.Random.value);
-					}
-					else if (SCANUtil.isCovered(ilon, scanline, data, SCANtype.Biome))
-					{
-						c = biomeCache[scanline * 360 + ilon];
-						return c;
-					}
-					break;
-
+					return mapType.Biome;
 				case MainMapDisplayMode.Visual:
-					// Visual is composited on the GPU (pumpVisualMap); the CPU surface is never shown in that mode.
-					break;
-			}
-
-			if (scanline % 30 == 0 && ilon % 3 == 0)
-			{
-				c = palette.White;
-			}
-			else if (ilon % 30 == 0 && scanline % 3 == 0)
-			{
-				c = palette.White;
-			}
-			return c;
-		}
-
-		private void buildBiomeCache()
-		{
-			for (int i = 0; i < 360; i++)
-			{
-				double index = SCANUtil.getBiomeIndexFraction(data.Body, i - 180, scanline - 90);
-				Color32 c = palette.Grey;
-
-				if (SCAN_Settings_Config.Instance.SmallMapBiomeBorder && ((i > 0 && biomeIndex[i - 1] != index) || (scanline > 0 && biomeIndex[i] != index)))
-				{
-					c = palette.White;
-				}
-				else if (SCAN_Settings_Config.Instance.SmallMapStockBiomes)
-				{
-					c = SCANUtil.getBiome(data.Body, i - 180, scanline - 90).mapColor;
-				}
-				else
-				{
-					c = palette.lerp(SCANcontroller.controller.lowBiomeColor32, SCANcontroller.controller.highBiomeColor32, (float)index);
-				}
-
-				biomeCache[scanline * 360 + i] = c;
-
-				biomeIndex[i] = index;
-			}
-
-			if (scanline >= 179)
-			{
-				biomeBuilding = false;
+					return mapType.Visual;
+				default:
+					return mapType.Altimetry;
 			}
 		}
-
-		/* Visual mode: composited on the GPU by a rectangular SCANmap the size of the small map.
-		   map_small stays the CPU surface for Terrain and Biome. */
 
 		private void ensureVisualMap()
 		{
@@ -1058,21 +842,42 @@ namespace SCANsat.SCAN_Unity
 			visualMap = new SCANmap(v.mainBody, false, mapSource.Data);
 			visualMap.setProjection(MapProjection.Rectangular);
 			visualMap.setSize(360, 180);
-			visualMap.MType = mapType.Visual;
+			visualMap.MType = displayModeToMapType(SCANcontroller.controller.mainMapDisplayMode);
 			visualMap.setBody(v.mainBody);
 		}
 
+		// Mode / colour / terminator / body changed: re-sync the map and start a fresh pass.
 		private void resetVisualMap()
 		{
 			ensureVisualMap();
 
 			visualMap.ColorMap = Color;
 			visualMap.Terminator = TerminatorToggle;
-			visualMap.resetMap(false, false);
+			visualMap.resetMap(displayModeToMapType(SCANcontroller.controller.mainMapDisplayMode), false, false, false);
 		}
 
-		private void pumpVisualMap()
+		private void pumpMap(MainMapDisplayMode display)
 		{
+			// Terrain draws from the body's 360x180 height map. Until the controller has built it, pump
+			// the build from here as the classic small map did, and draw nothing meanwhile.
+			if (display == MainMapDisplayMode.Terrain && !data.Built)
+			{
+				if (data.ControllerBuilding || data.OverlayBuilding)
+				{
+					return;
+				}
+
+				if (!data.MapBuilding)
+				{
+					scanline = 0;
+					scanstep = 0;
+				}
+
+				data.MapBuilding = true;
+				data.generateHeightMap(ref scanline, ref scanstep, 360);
+				return;
+			}
+
 			if (visualMap == null)
 			{
 				resetVisualMap();
@@ -1124,37 +929,7 @@ namespace SCANsat.SCAN_Unity
 
 		internal void resetImages()
 		{
-			for (int y = 0; y < map_small.height; y++)
-			{
-				for (int x = 0; x < map_small.width; x++)
-				{
-					if ((x % 30 == 0 && y % 3 > 0) || (y % 30 == 0 && x % 3 > 0))
-					{
-						map_small.SetPixel(x, y, palette.white);
-					}
-					else
-					{
-						map_small.SetPixel(x, y, palette.grey);
-					}
-				}
-			}
-
-			map_small.Apply();
-
-			if (SCANcontroller.controller.mainMapDisplayMode == MainMapDisplayMode.Biome)
-			{
-				biomeBuilding = true;
-				scanline = 0;
-			}
-
-			if (SCANcontroller.controller.mainMapDisplayMode == MainMapDisplayMode.Visual)
-			{
-				resetVisualMap();   // mode / colour / terminator / body changed: re-sync and start a fresh pass
-			}
-			else
-			{
-				destroyVisualMap();   // nothing is held for a map that is not showing Visual
-			}
+			resetVisualMap();
 		}
 
 		public void ResetPosition()

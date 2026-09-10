@@ -192,6 +192,21 @@ namespace SCANsat.SCAN_Map
 		private bool cache;
 		private double centeredLong, centeredLat;
 
+		// The small map (mapSource.Data: 360x180, rectangular, one pixel per degree) reads the body's
+		// prebuilt 360x180 height map instead of sampling PQS - the same grid and values the classic
+		// small map drew from SCANdata.HeightMapValue. Zero is "unsampled" in the cache, so a true 0 m
+		// is stored as -0.001, as terrainHeightToArray does.
+		private void gridHeightToArray(int ilon, int ilat)
+		{
+			float alt = data.HeightMapValue(body.flightGlobalsIndex, ilon, ilat);
+			if (alt == 0f)
+			{
+				alt = -0.001f;
+			}
+
+			big_heightmap[ilon, ilat] = alt;
+		}
+
 		private void terrainHeightToArray(double lon, double lat, int ilon, int ilat)
 		{
 			passHeightSamples++;
@@ -1056,7 +1071,7 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetFloat("_ResPixelSpace", (!cache || projection == MapProjection.Orthographic) ? 1f : 0f);
 			compositeMaterial.SetFloat("_RowMin", startLine);
 			compositeMaterial.SetFloat("_RowMax", stopLine);
-			compositeMaterial.SetFloat("_Grid", 0f);
+			compositeMaterial.SetFloat("_Grid", mSource == mapSource.Data ? 1f : 0f);   // the small map's dotted 30-degree graticule
 			compositeMaterial.SetFloat("_HasSource", colorTex != null ? 1f : 0f);
 			compositeMaterial.SetFloat("_NoData", gpuNoData() ? 1f : 0f);
 			compositeMaterial.SetFloat("_NoiseSeed", noiseSeed);
@@ -1064,6 +1079,11 @@ namespace SCANsat.SCAN_Map
 
 			Color unscanned = SCAN_Settings_Config.Instance.UnscannedColor;
 			unscanned.a *= SCAN_Settings_Config.Instance.UnscannedTransparency;
+			if (mSource == mapSource.Data)
+			{
+				unscanned = palette.Grey;   // the classic small map's base for uncovered pixels
+				unscanned.a = 1f;
+			}
 			compositeMaterial.SetColor("_UnscannedColor", unscanned);
 			compositeMaterial.SetColor("_ClearColor", palette.Clear);
 				Color greyCol = palette.Grey; greyCol.a = 1f;
@@ -1239,13 +1259,32 @@ namespace SCANsat.SCAN_Map
 				compositeMaterial.SetTexture("_BiomeIndexTex", biomeIndexTex);   // uploaded incrementally per row in getPartialMap
 				compositeMaterial.SetColor("_LowBiomeColor", SCANcontroller.controller.lowBiomeColor32);
 				compositeMaterial.SetColor("_HighBiomeColor", SCANcontroller.controller.highBiomeColor32);
-				compositeMaterial.SetFloat("_BiomeTransparency", SCAN_Settings_Config.Instance.BiomeTransparency);
-				bool border = mSource == mapSource.BigMap ? SCAN_Settings_Config.Instance.BigMapBiomeBorder : SCAN_Settings_Config.Instance.ZoomMapBiomeBorder;
+				// Per-source toggles. The small map (mapSource.Data) has its own settings and, like the
+				// classic small map, no elevation underlay on the biome colours.
+				bool border, stock;
+				float biomeTransparency = SCAN_Settings_Config.Instance.BiomeTransparency;
+				switch (mSource)
+				{
+					case mapSource.BigMap:
+						border = SCAN_Settings_Config.Instance.BigMapBiomeBorder;
+						stock = SCAN_Settings_Config.Instance.BigMapStockBiomes && colorMap;
+						break;
+					case mapSource.Data:
+						border = SCAN_Settings_Config.Instance.SmallMapBiomeBorder;
+						stock = SCAN_Settings_Config.Instance.SmallMapStockBiomes;
+						biomeTransparency = 0f;
+						break;
+					default:
+						border = SCAN_Settings_Config.Instance.ZoomMapBiomeBorder;
+						stock = SCAN_Settings_Config.Instance.BigMapStockBiomes && colorMap;
+						break;
+				}
+				compositeMaterial.SetFloat("_BiomeTransparency", biomeTransparency);
 				compositeMaterial.SetFloat("_BiomeBorder", border ? 1f : 0f);
 				buildBiomeLUT();
 				compositeMaterial.SetTexture("_BiomeLUT", biomeLUT);
 				compositeMaterial.SetFloat("_BiomeCount", biomeLUTCount);
-				compositeMaterial.SetFloat("_StockBiomes", (SCAN_Settings_Config.Instance.BigMapStockBiomes && colorMap) ? 1f : 0f);
+				compositeMaterial.SetFloat("_StockBiomes", stock ? 1f : 0f);
 				// elevation underlay: biome blends its colour with grey elevation by BiomeTransparency
 				compositeMaterial.SetTexture("_ElevationTex", elevationTex);
 				SCANterrainConfig tc = SCANUtil.getTerrainConfig(data);
@@ -1559,7 +1598,10 @@ namespace SCANsat.SCAN_Map
 
 							if (onMap && SCANUtil.isCovered(sampleLon, sampleLat, data, SCANtype.Altimetry))
 							{
-								terrainHeightToArray(sampleLon, sampleLat, i, lookAhead);
+								if (mSource == mapSource.Data && data.Built)
+									gridHeightToArray(i, lookAhead);   // the small map: the body's prebuilt height map, no PQS
+								else
+									terrainHeightToArray(sampleLon, sampleLat, i, lookAhead);
 							}
 						}
 					}
