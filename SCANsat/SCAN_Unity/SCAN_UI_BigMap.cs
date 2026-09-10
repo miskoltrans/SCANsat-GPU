@@ -346,7 +346,7 @@ namespace SCANsat.SCAN_Unity
 
 			if (bigmap == null)
 			{
-				bigmap = new SCANmap(body, true, mapSource.BigMap);
+				bigmap = new SCANmap(body, mapSource.BigMap);
 
 				MapProjection p = MapProjection.Rectangular;
 				mapType t = mapType.Altimetry;
@@ -579,17 +579,7 @@ namespace SCANsat.SCAN_Unity
 
 			if (!bigmap.isMapComplete())
 			{
-				if (SCAN_Settings_Config.Instance.MapGenerationSpeed > 2)
-				{
-					bigmap.getPartialMap(false);
-				}
-
-				if (SCAN_Settings_Config.Instance.MapGenerationSpeed > 1)
-				{
-					bigmap.getPartialMap(false);
-				}
-
-				bigmap.getPartialMap(true);
+				bigmap.getPartialMap();   // one call per frame; MapGenerationSpeed is the map's per-frame CPU budget
 			}
 
 			if (OrbitToggle && ShowOrbit)

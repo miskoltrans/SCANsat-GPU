@@ -258,7 +258,7 @@ namespace SCANsat.SCAN_Unity
 
 			if (spotmap == null)
 			{
-				spotmap = new SCANmap(body, false, mapSource.ZoomMap);
+				spotmap = new SCANmap(body, mapSource.ZoomMap);
 
 				mapType t = mapType.Altimetry;
 
@@ -378,7 +378,7 @@ namespace SCANsat.SCAN_Unity
 
 			rebuilding = true;
 
-			spotmap.resetMap(t, false, ResourceToggle, narrowBand);
+			spotmap.resetMap(t, ResourceToggle, narrowBand);
 		}
 
 		private void resetMap(double lat = 0, double lon = 0, bool withCenter = false)
@@ -744,18 +744,7 @@ namespace SCANsat.SCAN_Unity
 
 			if (!spotmap.isMapComplete())
 			{
-				if (SCAN_Settings_Config.Instance.MapGenerationSpeed > 2)
-				{
-					spotmap.getPartialMap(false);
-					spotmap.getPartialMap(false);
-				}
-
-				if (SCAN_Settings_Config.Instance.MapGenerationSpeed > 1)
-				{
-					spotmap.getPartialMap(false);
-				}
-
-				spotmap.getPartialMap(true);
+				spotmap.getPartialMap();   // one call per frame; MapGenerationSpeed is the map's per-frame CPU budget
 			}
 			else if (rebuilding)
 			{

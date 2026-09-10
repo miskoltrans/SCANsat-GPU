@@ -839,7 +839,7 @@ namespace SCANsat.SCAN_Unity
 
 			destroyVisualMap();
 
-			visualMap = new SCANmap(v.mainBody, false, mapSource.Data);
+			visualMap = new SCANmap(v.mainBody, mapSource.Data);
 			visualMap.setProjection(MapProjection.Rectangular);
 			visualMap.setSize(360, 180);
 			visualMap.MType = displayModeToMapType(SCANcontroller.controller.mainMapDisplayMode);
@@ -853,7 +853,7 @@ namespace SCANsat.SCAN_Unity
 
 			visualMap.ColorMap = Color;
 			visualMap.Terminator = TerminatorToggle;
-			visualMap.resetMap(displayModeToMapType(SCANcontroller.controller.mainMapDisplayMode), false, false, false);
+			visualMap.resetMap(displayModeToMapType(SCANcontroller.controller.mainMapDisplayMode), false, false);
 		}
 
 		private void pumpMap(MainMapDisplayMode display)
@@ -891,12 +891,7 @@ namespace SCANsat.SCAN_Unity
 				visualMap.resetMap(false, false);
 			}
 
-			if (SCAN_Settings_Config.Instance.MapGenerationSpeed > 1)
-			{
-				visualMap.getPartialMap(false);
-			}
-
-			visualMap.getPartialMap(true);
+			visualMap.getPartialMap();
 
 			showTexture(visualMap.DisplayTexture);
 		}

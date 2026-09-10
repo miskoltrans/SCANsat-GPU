@@ -12,10 +12,7 @@
 #endregion
 
 using System;
-using System.Linq;
-using System.IO;
 using UnityEngine;
-using SCANsat.SCAN_Platform.Palettes;
 using SCANsat.SCAN_Data;
 using SCANsat.SCAN_UI.UI_Framework;
 using SCANsat.SCAN_Unity;
@@ -25,10 +22,11 @@ namespace SCANsat.SCAN_Map
 {
 	public class SCANmap
 	{
-		internal SCANmap(CelestialBody Body, bool Cache, mapSource s)
+		internal SCANmap(CelestialBody Body, mapSource s)
 		{
 			body = Body;
 			mSource = s;
+			geographicCache = s == mapSource.BigMap;   // the big map caches the globe (setWidth); every other map caches its window (setSize)
 			pqs = body.pqsController != null;
 			biomeMap = body.BiomeMap != null;
 			data = SCANUtil.getData(body);
@@ -37,7 +35,6 @@ namespace SCANsat.SCAN_Map
 				data = new SCANdata(body);
 				SCANcontroller.controller.addToBodyData(body, data);
 			}
-			cache = Cache;
 		}
 
 		internal SCANmap()
@@ -51,7 +48,7 @@ namespace SCANsat.SCAN_Map
 			get { return mapscale; }
 			internal set
 			{
-				if (!cache && mapscale != value)
+				if (!geographicCache && mapscale != value)
 					clearWindowCaches();   // pixel-space caches: a new zoom level is a new window
 				mapscale = value;
 				resourceMapScale = (mapwidth / resourceMapWidth) * mapscale;
@@ -189,7 +186,10 @@ namespace SCANsat.SCAN_Map
 
 		/* MAP: Big Map height map caching */
 		private float[,] big_heightmap;
-		private bool cache;
+		// Which cache layout this map uses. The big map's elevation cache is geographic over the whole
+		// globe, so it survives projection changes; every other map's caches are pixel space over its
+		// current window (see prepRow, clearWindowCaches, _ElevPixelSpace).
+		private bool geographicCache;
 		private double centeredLong, centeredLat;
 
 		// The small map (mapSource.Data: 360x180, rectangular, one pixel per degree) reads the body's
@@ -232,7 +232,7 @@ namespace SCANsat.SCAN_Map
 
 			projection = p;
 			clearBiomeRowCache();   // the biome index cache is sampled in projected pixel space
-			if (!cache)
+			if (!geographicCache)
 				clearWindowCaches();   // and so is a window map's elevation cache
 		}
 
@@ -617,7 +617,7 @@ namespace SCANsat.SCAN_Map
 
 			// A window map's caches are pixel space, so a moved window invalidates them. Same window
 			// (the zoom map re-centres on every reset) keeps them, which is what makes a refresh warm.
-			if (!cache && (lon_offset != oldLonOffset || lat_offset != oldLatOffset || centeredLong != oldCenteredLong || centeredLat != oldCenteredLat))
+			if (!geographicCache && (lon_offset != oldLonOffset || lat_offset != oldLatOffset || centeredLong != oldCenteredLong || centeredLat != oldCenteredLat))
 				clearWindowCaches();
 		}
 
@@ -652,28 +652,11 @@ namespace SCANsat.SCAN_Map
 			return lat;
 		}
 
-		private double unScaleLatitude(double lat, double scale)
-		{
-			lat -= lat_offset;
-			lat += 90;
-			lat *= scale;
-			return lat;
-		}
-
 		private double unScaleLongitude(double lon)
 		{
 			lon -= lon_offset;
 			lon += 180;
 			lon *= mapscale;
-			return lon;
-		}
-
-		private double unScaleLongitude(double lon, double scale)
-		{
-			lon -= lon_offset;
-			lon = SCANUtil.fixLonShift(lon);
-			lon += 180;
-			lon *= scale;
 			return lon;
 		}
 
@@ -791,7 +774,7 @@ namespace SCANsat.SCAN_Map
 			// runtime, and new coverage is picked up per pixel by the "unsampled" checks. So they
 			// survive same-body calls (the big map calls setBody on every open) and clear only when the
 			// body actually changes.
-			if (cache && bodyChanged)
+			if (geographicCache && bodyChanged)
 			{
 				if (big_heightmap != null)
 					System.Array.Clear(big_heightmap, 0, big_heightmap.Length);
@@ -921,10 +904,9 @@ namespace SCANsat.SCAN_Map
 			}
 		}
 
-		public void resetMap(mapType mode, bool Cache, bool resourceOn, bool setRes = true)
+		public void resetMap(mapType mode, bool resourceOn, bool setRes = true)
 		{
 			mType = mode;
-			cache = Cache;
 			resetMap(resourceOn, setRes);
 		}
 
@@ -1067,8 +1049,8 @@ namespace SCANsat.SCAN_Map
 			// map (zoom, RPM, the small map's helper): pixel-space caches filled per rendered pixel. The
 			// resource cache is pixel space whenever generateResourceCache ran over the map's raw window
 			// (it unprojects for Orthographic, and a window map's raw window is not the globe).
-			compositeMaterial.SetFloat("_ElevPixelSpace", cache ? 0f : 1f);
-			compositeMaterial.SetFloat("_ResPixelSpace", (!cache || projection == MapProjection.Orthographic) ? 1f : 0f);
+			compositeMaterial.SetFloat("_ElevPixelSpace", geographicCache ? 0f : 1f);
+			compositeMaterial.SetFloat("_ResPixelSpace", (!geographicCache || projection == MapProjection.Orthographic) ? 1f : 0f);
 			compositeMaterial.SetFloat("_RowMin", startLine);
 			compositeMaterial.SetFloat("_RowMax", stopLine);
 			compositeMaterial.SetFloat("_Grid", mSource == mapSource.Data ? 1f : 0f);   // the small map's dotted 30-degree graticule
@@ -1589,7 +1571,7 @@ namespace SCANsat.SCAN_Map
 							double sampleLon = lon, sampleLat = cacheLat;
 							bool onMap = true;
 
-							if (!cache)
+							if (!geographicCache)
 							{
 								sampleLat = unprojectLatitude(lon, cacheLat);
 								sampleLon = unprojectLongitude(lon, cacheLat);
@@ -1733,9 +1715,10 @@ namespace SCANsat.SCAN_Map
 			}
 		}
 
-		/* MAP: build: one pump call. The UI calls this 1-4 times per frame (MapGenerationSpeed), the last
-		   with apply=true; the GPU paths act on that call only, the others are the old CPU row cadence. */
-		internal void getPartialMap(bool apply = true)
+		/* MAP: build: one pump call per frame while !isMapComplete. Each call does one frame's worth of
+		   work: a slice of the data build under the shared CPU budget, one composite, and the sweep
+		   advances by wall-clock time (tryRenderGPU). */
+		internal void getPartialMap()
 		{
 			if (data == null)
 			{
@@ -1744,9 +1727,7 @@ namespace SCANsat.SCAN_Map
 
 			if (mType == mapType.Visual && willRenderGPU(mapType.Visual))
 			{
-				// One composite per frame, on the pump's apply call; the sweep is paced by time in tryRenderGPU.
-				if (apply)
-					tryRenderGPU();
+				tryRenderGPU();
 				return;
 			}
 
@@ -1761,8 +1742,7 @@ namespace SCANsat.SCAN_Map
 			// timed reveal advances - keeps the sweep charm with no PQS re-sample and no re-processing.
 			if (gpuRecolorSweep)
 			{
-				if (apply)
-					tryRenderGPU();   // sets gpuSweepDone on the fully revealed Blit
+				tryRenderGPU();   // sets gpuSweepDone on the fully revealed Blit
 				if (gpuSweepDone)
 				{
 					gpuRecolorSweep = false;
@@ -1773,12 +1753,10 @@ namespace SCANsat.SCAN_Map
 				return;
 			}
 
-			// GPU data modes (Altimetry / Slope / Biome): budgeted build plus one composite per frame, on
-			// the pump's apply call.
+			// GPU data modes (Altimetry / Slope / Biome): budgeted build plus one composite per frame.
 			if (mType != mapType.Visual && willRenderGPU(mType))
 			{
-				if (apply)
-					buildGpuDataFrame();
+				buildGpuDataFrame();
 				return;
 			}
 

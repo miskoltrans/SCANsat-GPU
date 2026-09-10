@@ -156,9 +156,7 @@ namespace SCANsat.SCAN_UI.UI_Framework
 			return col;
 		}
 
-		public static Color32[] redline;
 
-		public static Color32[] small_redline;
 
 		public static Color32 heightToColor(float val, bool color, SCANterrainConfig terrain, float min = 0, float max = 0, float range = 0, bool useCustomRange = false)
 		{

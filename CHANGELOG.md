@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Maps render on the GPU everywhere: big map, zoom map, small map and RPM, in every mode. The per-row CPU renderers are gone; a pass builds its data under a per-frame CPU budget (Map Generation Speed) and reveals with a one-second sweep
+- Fixed the big map wiping its height cache on every open, which made every reopen re-sample the whole terrain
+- Biome maps cache the biome index per body, so repeated Biome passes no longer re-sample every pixel
+- Added Linux and macOS shader bundles
+- Fixed stray colours at both ends of legend bars and the biome legend tooltip drifting on bodies with many biomes
 - Fixed benign yet annoying assembly loader error about SCANsat.Unity
 - Updated Russian localization (thanks @BalaurGD )
 - Added Japanese localization (thanks @ThS45m )

@@ -836,7 +836,7 @@ namespace SCANsat.SCAN_UI
 			orbitingBody = vessel.mainBody;
 			if (map == null)
 			{
-				map = new SCANmap(orbitingBody, false, mapSource.RPM);
+				map = new SCANmap(orbitingBody, mapSource.RPM);
 				map.ColorMap = persist.RPMColor;
 				map.setProjection(MapProjection.Rectangular);
 			}
@@ -867,7 +867,7 @@ namespace SCANsat.SCAN_UI
 				map.Resource.CurrentBodyConfig(orbitingBody.bodyName);
 			}
 			calcTerrainLimits(orbitingBody);
-			map.resetMap((mapType)mapMode, false, SCANconfigLoader.GlobalResource && resourceOverlay);
+			map.resetMap((mapType)mapMode, SCANconfigLoader.GlobalResource && resourceOverlay);
 
 			// Compute and store the map scale factors in mapSizeScale.  We
 			// use these values for every segment when drawing trails, so it
