@@ -34,7 +34,32 @@ namespace SCANsat.SCAN_Unity
 		private const string prefabAssetName = "scan_prefabs.scan";
 		private const string unitySkinAssetName = "scan_unity_skin.scan";
 		private const string iconAssetName = "scan_icons.scan";
-		private const string shadersAssetName = "scan_shaders.scan";
+
+		// The shader bundle is per platform (Unity compiles shaders per graphics API and a bundle only
+		// carries its build target's APIs; see Unity/SCANsat/Assets/Editor/Bundler.cs). When the
+		// platform's file is not shipped, fall back to the Windows bundle: its shaders then report
+		// unsupported on this graphics device and SCANmap degrades exactly as before.
+		private static string shadersAssetName
+		{
+			get
+			{
+				string platformName;
+
+				switch (Application.platform)
+				{
+					case RuntimePlatform.LinuxPlayer:
+						platformName = "scan_shaders_linux.scan";
+						break;
+					case RuntimePlatform.OSXPlayer:
+						platformName = "scan_shaders_osx.scan";
+						break;
+					default:
+						return "scan_shaders.scan";
+				}
+
+				return System.IO.File.Exists(path + platformName) ? platformName : "scan_shaders.scan";
+			}
+		}
 
 		private static bool loaded;
 		private static bool skinLoaded;
