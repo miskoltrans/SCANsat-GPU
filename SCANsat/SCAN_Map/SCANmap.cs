@@ -751,6 +751,7 @@ namespace SCANsat.SCAN_Map
 		private bool gpuSweepDone;
 		private float sweepStart = -1f;   // realtimeSinceStartup at this pass's first composite; -1 until then
 		private const float SweepDuration = 1f;
+		private float noiseSeed;          // per-pass seed for the shader's no-data static (re-rolled in resetMap like the CPU's Random.value per pass)
 
 		/* MAP: nearly trivial functions */
 		public void setBody(CelestialBody b)
@@ -856,6 +857,7 @@ namespace SCANsat.SCAN_Map
 			gpuRendered = false;
 			gpuSweepDone = false;
 			sweepStart = -1f;
+			noiseSeed = UnityEngine.Random.value;
 			passHeightSamples = 0;
 			passBiomeSamples = 0;
 			passBuildFrames = 0;
@@ -1095,6 +1097,21 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetFloat("_SunLonCenter", (float)sunLonCenter);
 			compositeMaterial.SetFloat("_SunLatCenter", (float)sunLatCenter);
 			compositeMaterial.SetFloat("_Gamma", (float)gamma);
+
+			// Data-texture addressing and the classic-renderer details the shader reproduces. The big
+			// map's elevation cache is geographic; the resource cache is pixel space whenever it was
+			// generated over the map's raw window (generateResourceCache unprojects for Orthographic, and a
+			// window map's raw window is not the globe), geographic only for a non-Orthographic big map.
+			bool windowMap = lon_offset != 0 || lat_offset != 0 || mapscale * 360.0 > mapwidth + 0.5;
+			compositeMaterial.SetFloat("_ElevPixelSpace", 0f);
+			compositeMaterial.SetFloat("_ResPixelSpace", (projection == MapProjection.Orthographic || windowMap) ? 1f : 0f);
+			compositeMaterial.SetFloat("_RowMin", startLine);
+			compositeMaterial.SetFloat("_RowMax", stopLine);
+			compositeMaterial.SetFloat("_Grid", 0f);
+			compositeMaterial.SetFloat("_HasSource", colorTex != null ? 1f : 0f);
+			compositeMaterial.SetFloat("_NoData", 0f);
+			compositeMaterial.SetFloat("_NoiseSeed", noiseSeed);
+			compositeMaterial.SetFloat("_SweepBand", 2f);
 
 			Color unscanned = SCAN_Settings_Config.Instance.UnscannedColor;
 			unscanned.a *= SCAN_Settings_Config.Instance.UnscannedTransparency;

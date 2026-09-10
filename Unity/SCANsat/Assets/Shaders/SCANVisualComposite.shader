@@ -13,10 +13,12 @@
 //
 // Coverage stencil is now the raw 16-bit SCANdata.coverage, packed R=low byte / G=high byte.
 //
-// NOTE: rebuild the scan_shaders asset bundle (SCANsat -> Build All Bundles, Unity 2019.4.18f1)
-// after any change here; until then SCANsat uses the CPU path. Data-texture ORIENTATION (the geo
-// UV mappings below) is the main thing to verify in-game - if a mode is mirrored/flipped, adjust
-// the geoUV / elevUV / resUV construction (same class of fix as Visual's `fLon = 1 - fLon`).
+// NOTE: rebuild the scan_shaders asset bundles (SCANsat -> Build All Bundles, Unity 2019.4.18f1)
+// after any change here; the C# side sets every uniform below each frame, and a uniform the loaded
+// bundle does not know is silently ignored, so DLL and bundle can be updated independently.
+// Data-texture ORIENTATION (the geo UV mappings below) is the main thing to verify in-game - if a
+// mode is mirrored/flipped, adjust the geoUV / elevUV / resUV construction (same class of fix as
+// Visual's `fLon = 1 - fLon`).
 Shader "Hidden/SCANsat/VisualComposite"
 {
 	Properties
@@ -32,9 +34,14 @@ Shader "Hidden/SCANsat/VisualComposite"
 		// Cosmetic sweep reveal. Defaults render the whole map (SweepY >= 1) so a fresh
 		// Material is fully revealed even if the C# side never sets these (bundle/DLL skew).
 		_SweepY ("Sweep Reveal", Float) = 1
+		_SweepBand ("Sweep Band (rows)", Float) = 2
 		_MapMode ("Map Mode", Float) = 3
 		_MapBackgroundColor ("Map Background", Color) = (0,0,0,1)
 		_RedlineColor ("Redline", Color) = (1,0,0,1)
+		// Defaults that keep an unset material drawing the whole map the classic way.
+		_RowMin ("Row Min", Float) = 0
+		_RowMax ("Row Max", Float) = 1000000
+		_HasSource ("Has Visual Source", Float) = 1
 	}
 	SubShader
 	{
@@ -50,9 +57,9 @@ Shader "Hidden/SCANsat/VisualComposite"
 			sampler2D _ScaledColor;
 			sampler2D _ScaledNormal;
 			sampler2D _CoverageFlags;   // 360x180, point-sampled. R=low byte, G=high byte of SCANdata.coverage Int16
-			sampler2D _ElevationTex;    // geographic mapW x mapH, R = raw elevation (metres); from big_heightmap
-			sampler2D _BiomeIndexTex;   // geographic mapW x mapH, R = biome index fraction [0,1]
-			sampler2D _ResourceTex;     // geographic resW x resH, R = abundance fraction [0,1]; from resourceCache
+			sampler2D _ElevationTex;    // mapW x mapH, R = raw elevation (metres); from big_heightmap. Geographic for the big map, pixel space for window maps (_ElevPixelSpace)
+			sampler2D _BiomeIndexTex;   // mapW x mapH, R = biome index fraction [0,1]; always pixel space (filled per rendered pixel)
+			sampler2D _ResourceTex;     // resW x resH, R = abundance fraction [0,1]; from resourceCache. Geographic or pixel space (_ResPixelSpace)
 			sampler2D _PaletteLUT;      // 1-D (Nx1) elevation colour ramp baked from heightToColor (colour)
 			sampler2D _PaletteGreyLUT;  // 1-D grey ramp for LoRes-only altimetry (nowColor=false)
 			sampler2D _BiomeLUT;        // 1-D (biomeCount x1) stock biome mapColors, indexed by biome fraction
@@ -112,8 +119,26 @@ Shader "Hidden/SCANsat/VisualComposite"
 
 			// Cosmetic sweep reveal (matches the CPU modes' line-by-line render look).
 			float _SweepY;                 // revealed fraction in texture-row space (uv.y). >=1 = done, no redline.
+			float _SweepBand;              // redline thickness in rows
 			float4 _MapBackgroundColor;    // unused since the no-clear sweep; kept so the C# side can still set it
 			float4 _RedlineColor;          // the advancing scanline colour
+
+			// Data-texture addressing. The big map's elevation cache is geographic (it survives projection
+			// changes); a window map (zoom map, RPM) fills its cache per rendered pixel, so it is read at
+			// the pixel uv. The resource cache is pixel space whenever it was generated over the map's raw
+			// window (Orthographic, or any window map), geographic otherwise.
+			float _ElevPixelSpace;   // 1: read _ElevationTex at the pixel uv instead of geoUV
+			float _ResPixelSpace;    // 1: read _ResourceTex at the pixel uv instead of geoUV
+
+			// Rows outside [_RowMin, _RowMax] (map rows, inclusive) draw _ClearColor: RPM props reserve
+			// screen rows this way (SCANmap.startLine/stopLine, the CPU path's mapHidden).
+			float _RowMin;
+			float _RowMax;
+
+			float _Grid;        // 1: the small map's dotted 30-degree graticule, in the pixels like the CPU small map drew it
+			float _HasSource;   // Visual: 0 when there is no colour texture for the body -> whole map _UnscannedColor (the old CPU fallback)
+			float _NoData;      // 1: no terrain (Altimetry/Slope on a body without PQS) or no biome map (Biome): black-white static like the CPU renderers
+			float _NoiseSeed;   // re-rolled per pass by the C# side, so the static changes between passes rather than every frame
 
 			static const float SCAN_PI = 3.14159265358979;
 			static const float DEG2RAD = 0.0174532925199433;
@@ -260,9 +285,36 @@ Shader "Hidden/SCANsat/VisualComposite"
 				return fmod(floor(cov / exp2(bit)), 2.0) >= 0.5;
 			}
 
+			// Per-pixel black-white static for bodies with no data (the CPU renderers drew
+			// palette.lerp(Black, White, Random.value) there; the seed changes per pass like their re-roll).
+			float4 staticNoise(float2 px)
+			{
+				float2 p = frac((px + _NoiseSeed * 17.0) * float2(0.1031, 0.1030));
+				p += dot(p, p.yx + 33.33);
+				float n = frac((p.x + p.y) * p.x);
+				return float4(n, n, n, 1.0);
+			}
+
 			fixed4 frag(v2f_img i) : SV_Target
 			{
+				// Cosmetic sweep reveal first, before any work: rows ahead of the scanline are discarded (the
+				// RenderTexture keeps the previous pass there, as the CPU path overwrote its Texture2D row by
+				// row without clearing it first) and the frontier is a redline, full width like the CPU's.
+				if (_SweepY < 1.0)
+				{
+					if (i.uv.y > _SweepY)
+						discard;
+					if (i.uv.y > _SweepY - _SweepBand / _MapHeight)
+						return _RedlineColor;
+				}
+
 				float vy = _FlipY > 0.5 ? 1.0 - i.uv.y : i.uv.y;
+				float2 pixUV = float2(i.uv.x, vy);
+				float2 pix = floor(pixUV * float2(_MapWidth, _MapHeight));
+
+				// Row window (RPM reserved rows) = the CPU path's mapHidden -> palette.Clear.
+				if (pix.y < _RowMin || pix.y > _RowMax)
+					return _ClearColor;
 
 				// Pixel -> raw coord (SCANmap.cs:1023-1024), then unproject.
 				float lonRaw = (i.uv.x * _MapWidth / _MapScale) - 180.0 + _LonOffset;
@@ -280,6 +332,8 @@ Shader "Hidden/SCANsat/VisualComposite"
 				// Geographic UVs for the map-resolution data textures (equirectangular).
 				// NOTE verify orientation in-game; mirror like Visual's fLon if a mode comes out flipped.
 				float2 geoUV = float2(saturate((lon + 180.0) / 360.0), saturate((lat + 90.0) / 180.0));
+				float2 elevUV = _ElevPixelSpace > 0.5 ? pixUV : geoUV;
+				float2 resUV = _ResPixelSpace > 0.5 ? pixUV : geoUV;
 
 				// Base ScaledSpace UV for Visual (SCANmap.cs:1183-1199).
 				float fLat = saturate((lat + 90.0) / 180.0);
@@ -292,9 +346,13 @@ Shader "Hidden/SCANsat/VisualComposite"
 
 				if (_MapMode < 0.5)             // ---- Altimetry ----
 				{
-					if (covHas(cov, 0.0) || covHas(cov, 1.0))
+					if (_NoData > 0.5)
 					{
-						float elev = tex2D(_ElevationTex, geoUV).r;
+						col = staticNoise(pix);
+					}
+					else if (covHas(cov, 0.0) || covHas(cov, 1.0))
+					{
+						float elev = tex2D(_ElevationTex, elevUV).r;
 						float t = _TerrainRange > 0.0 ? saturate((elev - _TerrainMin) / _TerrainRange) : 0.5;
 						// HiRes -> colour ramp; LoRes-only -> grey ramp (matches CPU nowColor).
 						col = covHas(cov, 1.0) ? tex2D(_PaletteLUT, float2(t, 0.5)) : tex2D(_PaletteGreyLUT, float2(t, 0.5));
@@ -303,14 +361,18 @@ Shader "Hidden/SCANsat/VisualComposite"
 				}
 				else if (_MapMode < 1.5)        // ---- Slope ----
 				{
-					if (covHas(cov, 0.0) || covHas(cov, 1.0))
+					if (_NoData > 0.5)
+					{
+						col = staticNoise(pix);
+					}
+					else if (covHas(cov, 0.0) || covHas(cov, 1.0))
 					{
 						// True gradient from neighbour elevation texels (cleaner than the CPU
 						// cross-scanline max-diff; won't match it pixel-for-pixel by design).
 						float2 tx = float2(1.0 / _MapWidth, 1.0 / _MapHeight);
-						float e  = tex2D(_ElevationTex, geoUV).r;
-						float eR = tex2D(_ElevationTex, geoUV + float2(tx.x, 0)).r;
-						float eU = tex2D(_ElevationTex, geoUV + float2(0, tx.y)).r;
+						float e  = tex2D(_ElevationTex, elevUV).r;
+						float eR = tex2D(_ElevationTex, elevUV + float2(tx.x, 0)).r;
+						float eU = tex2D(_ElevationTex, elevUV + float2(0, tx.y)).r;
 						float v = saturate(max(abs(e - eR), abs(e - eU)) / (1000.0 / _MapScale) * 0.5);
 						v = min(v, 2.0);
 						if (v < _SlopeCutoff)
@@ -322,30 +384,37 @@ Shader "Hidden/SCANsat/VisualComposite"
 				}
 				else if (_MapMode < 2.5)        // ---- Biome ----
 				{
-					if (covHas(cov, 3.0))
+					if (_NoData > 0.5)
+					{
+						col = staticNoise(pix);
+					}
+					else if (covHas(cov, 3.0))
 					{
 						// biome_indexmap is filled per rendered pixel (unprojected) = map-pixel space, NOT the
-					// geographic equirect grid the elevation cache uses - so sample it at the fragment uv.
-					float2 bpix = float2(i.uv.x, vy);
-					float bIdx = tex2D(_BiomeIndexTex, bpix).r;
+						// geographic equirect grid the big map's elevation cache uses - so sample it at the pixel uv.
+						float bIdx = tex2D(_BiomeIndexTex, pixUV).r;
 						float2 tx = float2(1.0 / _MapWidth, 1.0 / _MapHeight);
-						float bL = tex2D(_BiomeIndexTex, bpix - float2(tx.x, 0)).r;
-						float bD = tex2D(_BiomeIndexTex, bpix - float2(0, tx.y)).r;
+						// Border: differs from the pixel to the left or the row below (the CPU's mapline compare).
+						float bL = tex2D(_BiomeIndexTex, pixUV - float2(tx.x, 0)).r;
+						float bD = tex2D(_BiomeIndexTex, pixUV - float2(0, tx.y)).r;
 						if (_BiomeBorder > 0.5 && (abs(bIdx - bL) > 0.0001 || abs(bIdx - bD) > 0.0001))
 						{
 							col = float4(1.0, 1.0, 1.0, 1.0);   // palette.White border
 						}
 						else
 						{
-							// SCANsat low/high gradient (stock-biome LUT path handled CPU-side for now).
 							// stock mapColor (LUT by biome fraction) or low/high gradient, + grey elevation underlay
-						float4 g = _StockBiomes > 0.5 ? tex2D(_BiomeLUT, float2(bIdx + 0.5 / max(_BiomeCount, 1.0), 0.5)) : lerp(_LowBiomeColor, _HighBiomeColor, bIdx);
-						float belev = tex2D(_ElevationTex, geoUV).r;
-						float eg = _TerrainRange > 0.0 ? saturate((belev - _TerrainMin) / _TerrainRange) : 0.5;
+							float4 g = _StockBiomes > 0.5 ? tex2D(_BiomeLUT, float2(bIdx + 0.5 / max(_BiomeCount, 1.0), 0.5)) : lerp(_LowBiomeColor, _HighBiomeColor, bIdx);
+							float belev = tex2D(_ElevationTex, elevUV).r;
+							float eg = _TerrainRange > 0.0 ? saturate((belev - _TerrainMin) / _TerrainRange) : 0.5;
 							col = lerp(g, float4(eg, eg, eg, 1.0), _BiomeTransparency);
 							col.a = 1.0;
 						}
 					}
+				}
+				else if (_HasSource < 0.5)      // ---- Visual (3) without a source texture: unscanned everywhere (the old CPU fallback)
+				{
+					col = _UnscannedColor;
 				}
 				else                            // ---- Visual (3) ----
 				{
@@ -382,7 +451,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 					bool resLo = covHas(cov, 7.0);
 					if (resHi || resLo)
 					{
-						float ab = tex2D(_ResourceTex, geoUV).r * 100.0;   // stored as fraction, *100 -> percent
+						float ab = tex2D(_ResourceTex, resUV).r * 100.0;   // stored as fraction, *100 -> percent
 						if (resLo && !resHi)
 							ab = floor(ab / 5.0) * 5.0 + 2.5;              // LoRes 5% buckets
 						if (ab < _ResMinRange)
@@ -395,6 +464,14 @@ Shader "Hidden/SCANsat/VisualComposite"
 					}
 				}
 
+				// The small map's dotted 30-degree graticule (SCAN_UI_MainMap.getMapPixelColor): a white dot
+				// every 3rd pixel along each 30-degree row and column. Applied before the terminator, as there.
+				if (_Grid > 0.5)
+				{
+					if ((fmod(pix.y, 30.0) < 0.5 && fmod(pix.x, 3.0) < 0.5) || (fmod(pix.x, 30.0) < 0.5 && fmod(pix.y, 3.0) < 0.5))
+						col = float4(1.0, 1.0, 1.0, 1.0);
+				}
+
 				// Terminator day/night darkening (SCANmap.cs:1342-1360).
 				if (_Terminator > 0.5)
 				{
@@ -402,18 +479,6 @@ Shader "Hidden/SCANsat/VisualComposite"
 					bool night = _SunLatCenter >= 0.0 ? (lat < crossingLat) : (lat > crossingLat);
 					if (night)
 						col.rgb = lerp(col.rgb, float3(0.0, 0.0, 0.0), 0.5);
-				}
-
-				// Cosmetic sweep reveal: rows ahead of the scanline are left untouched (discard keeps the
-				// RenderTexture's previous contents, as the CPU path overwrote its Texture2D row by row
-				// without clearing it first - no map clears before scanning), the frontier is a redline.
-				if (_SweepY < 1.0)
-				{
-					float band = 2.0 / _MapHeight;
-					if (i.uv.y > _SweepY)
-						discard;
-					else if (i.uv.y > _SweepY - band)
-						col = _RedlineColor;
 				}
 
 				return col;
