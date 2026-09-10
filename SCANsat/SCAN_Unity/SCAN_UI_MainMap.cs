@@ -1059,7 +1059,6 @@ namespace SCANsat.SCAN_Unity
 			visualMap.setProjection(MapProjection.Rectangular);
 			visualMap.setSize(360, 180);
 			visualMap.MType = mapType.Visual;
-			visualMap.CosmeticSweep = false;   // live display: one full Blit per pass, no scanline, like the classic small map
 			visualMap.setBody(v.mainBody);
 		}
 
@@ -1080,7 +1079,8 @@ namespace SCANsat.SCAN_Unity
 			}
 
 			// The small map is a live scanning display: when a pass completes, start another so newly
-			// scanned coverage shows up. A GPU pass is one Blit plus the cosmetic sweep, so this is cheap.
+			// scanned coverage shows up, under a redline like the classic small map's. A GPU pass is one
+			// composite per frame for the length of the timed sweep, so this is cheap.
 			if (visualMap.isMapComplete())
 			{
 				visualMap.resetMap(false, false);
