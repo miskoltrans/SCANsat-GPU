@@ -713,15 +713,12 @@ namespace SCANsat
 			}
 		}
 
+		// Terrain configs are generated once, at the main menu (checkLoadedTerrainNodes), for every
+		// body the cfg did not cover; nothing removes them at runtime. No duplicate guard: the one
+		// that used to be here only ever fired because of the controller-null bug in the getter.
 		public static void addToTerrainConfigData(string name, SCANterrainConfig data)
 		{
-			if (masterTerrainNodes.ContainsKey(name))
-			{
-				Log.Warning($"[{name}] Terrain Config already stored in SCANterrain Data Dictionary");
-				return;
-			}
-
-			masterTerrainNodes.Add(name, data);
+			masterTerrainNodes[name] = data;
 		}
 
 		public static int MasterResourceCount
@@ -2463,12 +2460,6 @@ namespace SCANsat
 			if (!body_data.Contains(VC.to.bodyName))
 			{
 				body_data.Add(VC.to.bodyName, new SCANdata(VC.to));
-			}
-
-			// Generate terrain config if it doesn't exist
-			if (SCANUtil.getTerrainConfig(VC.to) == null)
-			{
-				SCANUtil.generateTerrainConfig(VC.to);
 			}
 		}
 
