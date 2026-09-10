@@ -86,7 +86,6 @@ namespace SCANsat.SCAN_Unity
 		private Texture2D clearMap;
 		private bool clearMapSet;
 
-		private Texture2D gridMap;
 
 		private Texture2D resourceLegend;
 		private const int RESOURCELEGENDWIDTH = 90;
@@ -379,6 +378,7 @@ namespace SCANsat.SCAN_Unity
 			}
 
 			bigmap.setBody(body);
+			SCANcontroller.controller.RequestHeightMap(data);   // refines the body's terrain range in the background while it is on screen
 
 			currentResource = AssignResource(SCANcontroller.controller.bigMapResource);
 
@@ -520,12 +520,6 @@ namespace SCANsat.SCAN_Unity
 			{
 				GameObject.Destroy(resourceLegend);
 				resourceLegend = null;
-			}
-
-			if (gridMap != null)
-			{
-				GameObject.Destroy(gridMap);
-				gridMap = null;
 			}
 
 			if (eqMap != null)
@@ -1202,70 +1196,10 @@ namespace SCANsat.SCAN_Unity
 				return;
 			}
 
-			if (!GridToggle)
-			{
-				uiElement.UpdateGridTexture(clearMap);
-			}
-			else
-			{
-				GenerateGridMap();
-
-				uiElement.UpdateGridTexture(gridMap);
-			}
-		}
-
-		private void GenerateGridMap()
-		{
-			if (gridMap == null || gridMap.width != bigmap.MapWidth)
-			{
-				gridMap = new Texture2D(bigmap.MapWidth, bigmap.MapHeight, TextureFormat.ARGB32, false);
-			}
-
-			Color32[] pix = gridMap.GetPixels32();
-
-			for (int i = pix.Length - 1; i >= 0; i--)
-			{
-				pix[i] = palette.Clear;
-			}
-
-			int x, y;
-			for (double lat = -90; lat < 90; lat += 2)
-			{
-				for (double lon = -180; lon < 180; lon += 2)
-				{
-					if (lat % 30 == 0 || lon % 30 == 0)
-					{
-						x = (int)(bigmap.MapScale * ((bigmap.projectLongitude(lon, lat) + 180) % 360));
-						y = (int)(bigmap.MapScale * ((bigmap.projectLatitude(lon, lat) + 90) % 180));
-
-						pix[y * bigmap.MapWidth + x] = palette.White;
-
-						if (x < bigmap.MapWidth - 1)
-						{
-							pix[(y * bigmap.MapWidth) + (x + 1)] = palette.Black;
-						}
-
-						if (x > 0)
-						{
-							pix[(y * bigmap.MapWidth) + (x - 1)] = palette.Black;
-						}
-
-						if (y < bigmap.MapHeight - 1)
-						{
-							pix[((y + 1) * bigmap.MapWidth) + x] = palette.Black;
-						}
-
-						if (y > 0)
-						{
-							pix[((y - 1) * bigmap.MapWidth) + x] = palette.Black;
-						}
-					}
-				}
-			}
-
-			gridMap.SetPixels32(pix);
-
-			gridMap.Apply();
+			// The graticule is drawn by the map's shader now (SCANmap.GridLines); the UI's grid layer stays clear.
+			bigmap.GridLines = GridToggle;
+			bigmap.refreshComposite();
+			uiElement.UpdateGridTexture(clearMap);
 		}
 
 		public void SetMapSize()
@@ -1416,6 +1350,7 @@ namespace SCANsat.SCAN_Unity
 					data = bodyData;
 					body = data.Body;
 					bigmap.setBody(body);
+					SCANcontroller.controller.RequestHeightMap(data);
 
 					if (OrbitToggle && ShowOrbit)
 					{

@@ -837,6 +837,7 @@ namespace SCANsat.SCAN_UI
 			if (map == null)
 			{
 				map = new SCANmap(orbitingBody, mapSource.RPM);
+				map.AutoRange = true;   // palette range fitted to the window by the map's own pre-pass (was calcTerrainLimits here)
 				map.ColorMap = persist.RPMColor;
 				map.setProjection(MapProjection.Rectangular);
 			}
@@ -866,7 +867,6 @@ namespace SCANsat.SCAN_UI
 				map.Resource = loadedResources[currentResource];
 				map.Resource.CurrentBodyConfig(orbitingBody.bodyName);
 			}
-			calcTerrainLimits(orbitingBody);
 			map.resetMap((mapType)mapMode, SCANconfigLoader.GlobalResource && resourceOverlay);
 
 			// Compute and store the map scale factors in mapSizeScale.  We
@@ -891,104 +891,6 @@ namespace SCANsat.SCAN_UI
 			double kmPerDegreeLon = (2 * Math.PI * (orbitingBody.Radius / 1000d)) / 360d;
 			double pixelsPerDegree = Math.Abs(longitudeToPixels(mapCenterLong + (((mapCenterLong + 1) > 360) ? -1 : 1), mapCenterLat) - longitudeToPixels(mapCenterLong, mapCenterLat));
 			pixelsPerKm = pixelsPerDegree / kmPerDegreeLon;
-		}
-
-		private void calcTerrainLimits(CelestialBody b)
-		{
-			if (map.MType == mapType.Slope)
-			{
-				return;
-			}
-
-			int w = map.MapWidth / 4;
-			int h = map.MapHeight / 4;
-
-			float max = -200000;
-			float min = 100000;
-
-			float resourceMax = 0;
-			float resourceMin = 100;
-
-			for (int i = 0; i < map.MapHeight; i += 4)
-			{
-				for (int j = 0; j < map.MapWidth; j += 4)
-				{
-					double lat = (i * 1.0f / map.MapScale) - 90f + map.Lat_Offset;
-					double lon = (j * 1.0f / map.MapScale) - 180f + map.Lon_Offset;
-					double la = lat, lo = lon;
-					lat = map.unprojectLatitude(lo, la);
-					lon = map.unprojectLongitude(lo, la);
-
-					float terrain = (float)SCANUtil.getElevation(b, lon, lat);
-
-					if (map.Resource != null)
-					{
-						float resource = SCANUtil.ResourceOverlay(lat, lon, map.Resource.Name, orbitingBody, false) * 100f;
-
-						if (resource < resourceMin)
-						{
-							resourceMin = resource;
-						}
-
-						if (resource > resourceMax)
-						{
-							resourceMax = resource;
-						}
-					}
-					else
-					{
-						resourceMax = 100;
-						resourceMin = 0;
-					}
-
-					if (terrain < min)
-					{
-						min = terrain;
-					}
-
-					if (terrain > max)
-					{
-						max = terrain;
-					}
-				}
-			}
-
-			if (min > max)
-			{
-				min = max - 1f;
-			}
-
-			if (min == max)
-			{
-				min = max - 1f;
-			}
-
-			if (map.Resource != null && map.Resource.CurrentBody != null && resourceMin < map.Resource.CurrentBody.MinValue)
-			{
-				resourceMin = map.Resource.CurrentBody.MinValue;
-			}
-
-			if (resourceMin >= resourceMax)
-			{
-				resourceMax = resourceMin + 1f;
-			}
-
-			if (resourceMin < 0)
-			{
-				resourceMin = 0;
-			}
-
-			if (map.Resource != null && map.Resource.CurrentBody != null && resourceMax > map.Resource.CurrentBody.MaxValue)
-			{
-				resourceMax = map.Resource.CurrentBody.MaxValue;
-			}
-
-			if (resourceMin >= resourceMax)
-			{
-				resourceMin = resourceMax - 1f;
-			}
-
-			map.setCustomRange(min, max, resourceMin, resourceMax);
 		}
 
 		private bool UpdateCheck()

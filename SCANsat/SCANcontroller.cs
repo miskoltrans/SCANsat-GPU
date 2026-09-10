@@ -476,8 +476,6 @@ namespace SCANsat
 		/* Is the Breaking Ground Expansion installed */
 		private bool serenityLoaded = false;
 
-		private bool heightMapsBuilt = false;
-
 		private static SCANcontroller instance;
 
 		#region Public Accessors
@@ -1297,7 +1295,7 @@ namespace SCANsat
 				scanFromAllVessels();
 			}
 
-			if (!heightMapsBuilt)
+			if (heightMapWorkPending)
 			{
 				checkHeightMapStatus();
 			}
@@ -1379,62 +1377,76 @@ namespace SCANsat
 		private int dataStep, dataStart;
 		private bool currentlyBuilding;
 		private SCANdata buildingData;
+		private readonly List<SCANdata> heightMapRequests = new List<SCANdata>();
+
+		/// <summary>
+		/// Build a body's 360x180 height map in the background, 120 samples per frame, if it is not built
+		/// yet. The maps that read it (the small map's Terrain, the terrain overlay) pump it themselves
+		/// when they need it; the big map asks here so the body's terrain range is refined while it is
+		/// being looked at. Nothing is built for bodies nobody looks at - the old walk over every body
+		/// at scene start cost about thirteen seconds per body on RSS.
+		/// </summary>
+		internal void RequestHeightMap(SCANdata d)
+		{
+			if (d == null || d.Built || d == buildingData || heightMapRequests.Contains(d))
+			{
+				return;
+			}
+
+			heightMapRequests.Add(d);
+		}
+
+		private bool heightMapWorkPending
+		{
+			get { return currentlyBuilding || heightMapRequests.Count > 0; }
+		}
 
 		private void checkHeightMapStatus()
 		{
 			if (!currentlyBuilding)
 			{
-				for (int i = 0; i < body_data.Count; i++)
+				while (heightMapRequests.Count > 0)
 				{
-					buildingData = getData(i);
+					buildingData = heightMapRequests[0];
+					heightMapRequests.RemoveAt(0);
 
-					if (buildingData == null)
+					if (buildingData == null || buildingData.Built || buildingData.MapBuilding || buildingData.OverlayBuilding)
 					{
-						continue;
-					}
-
-					if (buildingData.Built)
-					{
-						continue;
-					}
-
-					if (buildingData.MapBuilding || buildingData.OverlayBuilding)
-					{
-						continue;
+						continue;   // built meanwhile, or another window is pumping it
 					}
 
 					buildingData.ControllerBuilding = true;
 					currentlyBuilding = true;
-
+					dataStep = 0;
+					dataStart = 0;
 					return;
 				}
+
+				buildingData = null;
+				return;
 			}
-			else
+
+			if (buildingData == null)
 			{
-				if (buildingData == null)
-				{
-					currentlyBuilding = false;
-					return;
-				}
-
-				if (buildingData.Built)
-				{
-					currentlyBuilding = false;
-					buildingData.ControllerBuilding = false;
-					return;
-				}
-
-				if (buildingData.ControllerBuilding)
-				{
-					buildingData.generateHeightMap(ref dataStep, ref dataStart, 120);
-					return;
-				}
+				currentlyBuilding = false;
+				return;
 			}
 
-			SCANUtil.SCANlog("All Height Maps Generated");
+			if (buildingData.Built)
+			{
+				currentlyBuilding = false;
+				buildingData.ControllerBuilding = false;
+				buildingData = null;
+				return;
+			}
 
-			buildingData = null;
-			heightMapsBuilt = true;
+			if (buildingData.ControllerBuilding)
+			{
+				buildingData.generateHeightMap(ref dataStep, ref dataStart, 120);
+				return;
+			}
+
+			currentlyBuilding = false;   // another window took the build over
 		}
 
 		private void OnDestroy()
@@ -1488,7 +1500,7 @@ namespace SCANsat
 				SCAN_Settings_Config.Instance.Save();
 			}
 
-			if (!heightMapsBuilt)
+			if (currentlyBuilding)
 			{
 				for (int i = dataBodies.Count - 1; i >= 0; i--)
 				{

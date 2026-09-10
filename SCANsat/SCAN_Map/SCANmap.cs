@@ -12,6 +12,7 @@
 #endregion
 
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using SCANsat.SCAN_Data;
 using SCANsat.SCAN_UI.UI_Framework;
@@ -26,7 +27,7 @@ namespace SCANsat.SCAN_Map
 		{
 			body = Body;
 			mSource = s;
-			geographicCache = s == mapSource.BigMap;   // the big map caches the globe (setWidth); every other map caches its window (setSize)
+			geographicCache = s == mapSource.BigMap || s == mapSource.Overlay;   // these cache the globe (setWidth); every other map caches its window (setSize)
 			pqs = body.pqsController != null;
 			biomeMap = body.BiomeMap != null;
 			data = SCANUtil.getData(body);
@@ -180,6 +181,65 @@ namespace SCANsat.SCAN_Map
 			get { return customRange; }
 		}
 
+		public float CustomResourceMin
+		{
+			get { return customResourceMin; }
+		}
+
+		public float CustomResourceMax
+		{
+			get { return customResourceMax; }
+		}
+
+		// Per-source behaviour (see the fields): the planet overlay turns the sweep and the biome
+		// underlay off and may draw only the resource layer; the window maps fit their own range.
+		internal bool SweepEnabled
+		{
+			get { return sweepEnabled; }
+			set { sweepEnabled = value; }
+		}
+
+		internal bool BiomeUnderlay
+		{
+			get { return biomeUnderlay; }
+			set { biomeUnderlay = value; }
+		}
+
+		internal bool BaseNone
+		{
+			get { return baseNone; }
+			set { baseNone = value; }
+		}
+
+		internal bool GridLines
+		{
+			get { return gridLines; }
+			set { gridLines = value; }
+		}
+
+		internal bool AutoRange
+		{
+			get { return autoRange; }
+			set
+			{
+				autoRange = value;
+				if (value)
+					useCustomRange = true;   // the pre-pass fills the values in before the first row is revealed
+			}
+		}
+
+		internal float OutputAlpha
+		{
+			get { return outputAlpha; }
+			set { outputAlpha = value; }
+		}
+
+		internal float ResGreyBlend
+		{
+			get { return resGreyBlend; }
+			set { resGreyBlend = value; }
+		}
+
 		#endregion
 
 		#region Big Map methods and fields
@@ -192,10 +252,15 @@ namespace SCANsat.SCAN_Map
 		private bool geographicCache;
 		private double centeredLong, centeredLat;
 
-		// The small map (mapSource.Data: 360x180, rectangular, one pixel per degree) reads the body's
-		// prebuilt 360x180 height map instead of sampling PQS - the same grid and values the classic
-		// small map drew from SCANdata.HeightMapValue. Zero is "unsampled" in the cache, so a true 0 m
-		// is stored as -0.001, as terrainHeightToArray does.
+		// The small map and the terrain planet overlay are 360x180 rectangular maps, one pixel per
+		// degree: they read the body's prebuilt 360x180 height map instead of sampling PQS - the same
+		// grid and values the classic code drew from SCANdata.HeightMapValue.
+		private bool usesHeightGrid()
+		{
+			return (mSource == mapSource.Data || mSource == mapSource.Overlay) && data.Built && mapwidth == 360 && mapheight == 180 && projection == MapProjection.Rectangular;
+		}
+
+		// Zero is "unsampled" in the cache, so a true 0 m is stored as -0.001, as terrainHeightToArray does.
 		private void gridHeightToArray(int ilon, int ilat)
 		{
 			float alt = data.HeightMapValue(body.flightGlobalsIndex, ilon, ilat);
@@ -743,6 +808,19 @@ namespace SCANsat.SCAN_Map
 		private const float SweepDuration = 1f;
 		private float noiseSeed;          // per-pass seed for the shader's no-data static (re-rolled in resetMap like the CPU's Random.value per pass)
 
+		// Per-source behaviour switches. Defaults are the map windows'; the planet overlay and the
+		// window maps' auto range change them through the properties below.
+		private bool sweepEnabled = true;    // false: no timed reveal, the pass is complete when the build is (planet overlay)
+		private bool biomeUnderlay = true;   // false: Biome samples no elevation for its underlay (small map, planet overlay)
+		private bool baseNone;               // true: no base layer, only the resource pass over clear (resource planet overlay)
+		private bool gridLines;              // true: the big map's 30-degree graticule, drawn by the shader
+		private bool autoRange;              // true: palette range fitted to the window's own samples (zoom map, RPM)
+		private float outputAlpha = 1f;      // final multiplier on the composite (terrain planet overlay: 0.9)
+		private float resGreyBlend = 0.3f;   // resourceToColor32's Transparency argument for below-range cells
+		private int rangeRow = -1;           // autoRange pre-pass cursor: -1 not started, >= mapheight done
+		private float rangeMin, rangeMax;
+		private int rangeSamples;
+
 		/* MAP: nearly trivial functions */
 		public void setBody(CelestialBody b)
 		{
@@ -838,6 +916,7 @@ namespace SCANsat.SCAN_Map
 			gpuRendered = false;
 			gpuSweepDone = false;
 			sweepStart = -1f;
+			rangeRow = -1;
 			noiseSeed = UnityEngine.Random.value;
 			passHeightSamples = 0;
 			passBiomeSamples = 0;
@@ -1066,11 +1145,14 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetFloat("_ResPixelSpace", (!geographicCache || projection == MapProjection.Orthographic) ? 1f : 0f);
 			compositeMaterial.SetFloat("_RowMin", startLine);
 			compositeMaterial.SetFloat("_RowMax", stopLine);
-			compositeMaterial.SetFloat("_Grid", mSource == mapSource.Data ? 1f : 0f);   // the small map's dotted 30-degree graticule
+			compositeMaterial.SetFloat("_Grid", mSource == mapSource.Data ? 1f : (gridLines ? 2f : 0f));   // 1 the small map's dots, 2 the big map's lines
 			compositeMaterial.SetFloat("_HasSource", colorTex != null ? 1f : 0f);
 			compositeMaterial.SetFloat("_NoData", gpuNoData() ? 1f : 0f);
 			compositeMaterial.SetFloat("_NoiseSeed", noiseSeed);
 			compositeMaterial.SetFloat("_SweepBand", 2f);
+			compositeMaterial.SetFloat("_BaseNone", baseNone ? 1f : 0f);
+			compositeMaterial.SetFloat("_OutputAlpha", outputAlpha);
+			compositeMaterial.SetFloat("_ResGreyBlend", resGreyBlend);
 
 			Color unscanned = SCAN_Settings_Config.Instance.UnscannedColor;
 			unscanned.a *= SCAN_Settings_Config.Instance.UnscannedTransparency;
@@ -1078,6 +1160,10 @@ namespace SCANsat.SCAN_Map
 			{
 				unscanned = palette.Grey;   // the classic small map's base for uncovered pixels
 				unscanned.a = 1f;
+			}
+			else if (mSource == mapSource.Overlay)
+			{
+				unscanned = palette.Clear;  // the planet overlays leave uncovered terrain transparent
 			}
 			compositeMaterial.SetColor("_UnscannedColor", unscanned);
 			compositeMaterial.SetColor("_ClearColor", palette.Clear);
@@ -1099,7 +1185,7 @@ namespace SCANsat.SCAN_Map
 			float reveal = 1f;
 			if (mapheight > 0)
 			{
-				reveal = timedSweepFraction();
+				reveal = sweepEnabled ? timedSweepFraction() : 1f;
 				if (mType != mapType.Visual && !gpuRecolorSweep)
 					reveal = Mathf.Min(reveal, Mathf.Clamp01(mapstep / (float)mapheight));
 			}
@@ -1119,6 +1205,16 @@ namespace SCANsat.SCAN_Map
 				mapstep = mapheight;                  // mark complete for the legacy mapstep-based checks
 			}
 			return true;
+		}
+
+		// Composite once more with the current uniforms, without a new pass: for a display toggle that
+		// only the shader needs to know about (the big map's graticule). No-op before the first render.
+		internal void refreshComposite()
+		{
+			if (gpuRendered && willRenderGPU(mType))
+			{
+				tryRenderGPU();
+			}
 		}
 
 		// Wall-clock reveal fraction for a sweep whose end state is already rendered. The clock starts
@@ -1269,6 +1365,11 @@ namespace SCANsat.SCAN_Map
 						stock = SCAN_Settings_Config.Instance.SmallMapStockBiomes;
 						biomeTransparency = 0f;
 						break;
+					case mapSource.Overlay:
+						border = false;            // the planet overlay: plain stock colours, no borders, no underlay
+						stock = true;
+						biomeTransparency = 0f;
+						break;
 					default:
 						border = SCAN_Settings_Config.Instance.ZoomMapBiomeBorder;
 						stock = SCAN_Settings_Config.Instance.BigMapStockBiomes && colorMap;
@@ -1381,6 +1482,8 @@ namespace SCANsat.SCAN_Map
 		private void buildResourceCache()
 		{
 			SCANuiUtil.generateResourceCache(ref resourceCache, resourceMapHeight, resourceMapWidth, resourceInterpolation, resourceMapScale, this);
+			if (autoRange)
+				applyAutoResourceRange();   // from the sampled cells, before interpolation fills the gaps
 			System.Random rr = new System.Random(ResourceScenario.Instance.gameSettings.Seed);
 			for (int i = resourceInterpolation / 2; i >= 1; i /= 2)
 			{
@@ -1531,6 +1634,185 @@ namespace SCANsat.SCAN_Map
 			gpuDataComplete = false;
 		}
 
+		// One row of the auto-range pre-pass: every 4th pixel of row rangeRow, sampled at its unprojected
+		// coordinate into the cache (the build skips those pixels later), min/max accumulated. Same
+		// stride and coordinates as the windows' old calcTerrainLimits, coverage ignored as there.
+		private void preSampleRangeRow()
+		{
+			if (rangeRow < 0)
+			{
+				rangeRow = 0;
+				rangeMin = float.MaxValue;
+				rangeMax = float.MinValue;
+				rangeSamples = 0;
+			}
+
+			int row = rangeRow;
+
+			if (row < mapheight && row >= startLine && row <= stopLine && big_heightmap != null)
+			{
+				for (int i = 0; i < mapwidth; i += 4)
+				{
+					double lat = (row * 1.0f / mapscale) - 90f + lat_offset;
+					double lon = (i * 1.0f / mapscale) - 180f + lon_offset;
+					double la = lat, lo = lon;
+					lat = unprojectLatitude(lo, la);
+					lon = unprojectLongitude(lo, la);
+
+					if (double.IsNaN(lat) || double.IsNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180)
+					{
+						continue;
+					}
+
+					float v = big_heightmap[i, row];
+
+					if (v == 0f)
+					{
+						terrainHeightToArray(lon, lat, i, row);
+						v = big_heightmap[i, row];
+					}
+
+					if (v == -0.001f)
+					{
+						v = 0f;   // the cache's stand-in for a true 0 m
+					}
+
+					if (v < rangeMin) rangeMin = v;
+					if (v > rangeMax) rangeMax = v;
+					rangeSamples++;
+				}
+			}
+
+			rangeRow += 4;
+		}
+
+		// calcTerrainLimits' guards, then the range the palette LUT and the legend use.
+		private void applyAutoTerrainRange()
+		{
+			if (rangeSamples == 0)
+			{
+				return;
+			}
+
+			float min = rangeMin, max = rangeMax;
+
+			if (min >= max)
+			{
+				min = max - 1f;
+			}
+
+			useCustomRange = true;
+			customMin = min;
+			customMax = max;
+			customRange = max - min;
+		}
+
+		// The resource range over the window from the cells generateResourceCache just sampled, with
+		// calcTerrainLimits' guards (never outside the body's configured range, never empty).
+		private void applyAutoResourceRange()
+		{
+			if (resource == null || resource.CurrentBody == null || resourceCache == null)
+			{
+				return;
+			}
+
+			int step = Math.Max(1, resourceInterpolation);
+			float min = 100f, max = 0f;
+			bool any = false;
+
+			for (int j = 0; j < resourceMapHeight; j += step)
+			{
+				for (int i = 0; i < resourceMapWidth; i += step)
+				{
+					float v = resourceCache[i, j];
+					if (v < min) min = v;
+					if (v > max) max = v;
+					any = true;
+				}
+			}
+
+			if (!any)
+			{
+				min = 0f;
+				max = 100f;
+			}
+
+			if (min < resource.CurrentBody.MinValue) min = resource.CurrentBody.MinValue;
+			if (min >= max) max = min + 1f;
+			if (min < 0f) min = 0f;
+			if (max > resource.CurrentBody.MaxValue) max = resource.CurrentBody.MaxValue;
+			if (min >= max) min = max - 1f;
+
+			useCustomRange = true;
+			customResourceMin = min;
+			customResourceMax = max;
+		}
+
+		// The biomes present in this map's window, read from the biome index cache once rows are
+		// built (the zoom map's legend lists them). Null until any row is cached.
+		internal List<CBAttributeMapSO.MapAttribute> BiomesInView()
+		{
+			if (body == null || body.BiomeMap == null || biome_indexmap == null || biomeRowCached == null)
+			{
+				return null;
+			}
+
+			CBAttributeMapSO.MapAttribute[] atts = body.BiomeMap.Attributes;
+			CBAttributeMapSO.MapAttribute[] pal = SCANUtil.GetOrBuildPalette(body);
+			bool[] seen = new bool[atts.Length];
+			List<CBAttributeMapSO.MapAttribute> list = new List<CBAttributeMapSO.MapAttribute>();
+			bool anyRow = false;
+
+			for (int y = 0; y < mapheight && y < biomeRowCached.Length; y++)
+			{
+				if (!biomeRowCached[y])
+				{
+					continue;
+				}
+
+				anyRow = true;
+
+				for (int x = 0; x < mapwidth; x++)
+				{
+					int idx = Mathf.RoundToInt(biome_indexmap[x, y] * atts.Length);
+
+					if (idx < 0 || idx >= atts.Length || seen[idx])
+					{
+						continue;
+					}
+
+					seen[idx] = true;
+					list.Add(pal != null && idx < pal.Length && pal[idx] != null ? pal[idx] : atts[idx]);
+				}
+			}
+
+			return anyRow ? list : null;
+		}
+
+		// Composite this map once more at w x h into a fresh RenderTexture (the caller releases it). The
+		// planet overlay renders its geographic data at the overlay's own size this way. Every other
+		// uniform is the last composite's; the next tryRenderGPU resets them all.
+		internal RenderTexture renderAt(int w, int h)
+		{
+			if (!gpuRendered || compositeMaterial == null || mapwidth <= 0)
+			{
+				return null;
+			}
+
+			RenderTexture rt = new RenderTexture(w, h, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
+			rt.wrapMode = TextureWrapMode.Clamp;
+			rt.Create();
+
+			compositeMaterial.SetFloat("_MapWidth", w);
+			compositeMaterial.SetFloat("_MapHeight", h);
+			compositeMaterial.SetFloat("_MapScale", (float)(mapscale * w / mapwidth));
+			compositeMaterial.SetFloat("_RowMax", h - 1);
+			compositeMaterial.SetFloat("_SweepY", 1f);
+
+			Graphics.Blit(null, rt, compositeMaterial);
+			return rt;
+		}
+
 		// Bodies the CPU renderers drew as black-white static: no PQS for Altimetry/Slope, no biome
 		// map for Biome. The shader does the same (_NoData); there is nothing to build for them.
 		private bool gpuNoData()
@@ -1568,7 +1850,7 @@ namespace SCANsat.SCAN_Map
 				double cacheLat = ((mapstep + 1) * 1.0f / mapscale) - 90f + lat_offset;
 				double lon = (i * 1.0f / mapscale) - 180f + lon_offset;
 
-				if (mType != mapType.Visual)
+				if (mType != mapType.Visual && (mType != mapType.Biome || biomeUnderlay))
 				{
 					int lookAhead = mapstep + 1;
 					bool lookAheadHidden = lookAhead < startLine || lookAhead > stopLine;   // RPM reserved rows: the shader draws them clear
@@ -1593,8 +1875,8 @@ namespace SCANsat.SCAN_Map
 
 							if (onMap && SCANUtil.isCovered(sampleLon, sampleLat, data, SCANtype.Altimetry))
 							{
-								if (mSource == mapSource.Data && data.Built)
-									gridHeightToArray(i, lookAhead);   // the small map: the body's prebuilt height map, no PQS
+								if (usesHeightGrid())
+									gridHeightToArray(i, lookAhead);   // one pixel per degree: the body's prebuilt height map, no PQS
 								else
 									terrainHeightToArray(sampleLon, sampleLat, i, lookAhead);
 							}
@@ -1655,8 +1937,8 @@ namespace SCANsat.SCAN_Map
 			if (mapstep < -1)
 				mapstep = -1;   // the -2 step is the CPU path's resource cache build
 
-			if (gpuNoData() && mapstep < mapheight)
-				mapstep = mapheight;   // nothing to build; the shader draws static and the sweep runs on its own
+			if ((gpuNoData() || baseNone) && mapstep < mapheight)
+				mapstep = mapheight;   // nothing to build: the shader draws static, or only the resource layer (its cache is built lazily by the composite)
 
 			if (biomeRowCached == null || biomeRowCached.Length != mapheight)
 				biomeRowCached = new bool[mapheight];
@@ -1666,6 +1948,33 @@ namespace SCANsat.SCAN_Map
 				if (passBuildStart < 0f)
 					passBuildStart = Time.realtimeSinceStartup;
 				passBuildFrames++;
+			}
+
+			// Auto range (zoom map, RPM): before any row is built or revealed, sample every 4th pixel of
+			// the window into the cache and fit the palette range to what is there - what the windows'
+			// calcTerrainLimits did synchronously before each reset, now under the budget. Rows start only
+			// once the range is final, so the first revealed row already has the right colours.
+			if (autoRange && pqs && mapstep <= -1 && (mType == mapType.Altimetry || mType == mapType.Biome))
+			{
+				while (rangeRow < mapheight)
+				{
+					preSampleRangeRow();
+
+					if (rangeRow >= mapheight)
+					{
+						applyAutoTerrainRange();
+						break;
+					}
+
+					if (System.Diagnostics.Stopwatch.GetTimestamp() - start >= budget)
+						break;
+				}
+
+				if (rangeRow < mapheight)
+				{
+					budgetUsedTicks += System.Diagnostics.Stopwatch.GetTimestamp() - start;
+					return;   // nothing to show yet; the RenderTexture keeps the previous pass
+				}
 			}
 
 			// At least one step per frame, however long it takes, then as many as fit the budget.
@@ -1717,6 +2026,10 @@ namespace SCANsat.SCAN_Map
 				gpuDataHash = pendingDataHash;    // ...for the coverage this build started from (see resetMap)
 				passBuildMs = (Time.realtimeSinceStartup - passBuildStart) * 1000f;
 			}
+
+			// Without the cosmetic sweep (planet overlay) nothing is shown mid-build: composite once when done.
+			if (!sweepEnabled && mapstep < mapheight)
+				return;
 
 			tryRenderGPU();   // reveal = min(timed sweep, mapstep / mapheight); sets gpuSweepDone at 1
 

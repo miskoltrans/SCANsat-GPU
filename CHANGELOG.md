@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Planet overlays (biome, terrain, resource) are composited by the map shader and read back into the same texture the planet always received; the per-pixel CPU drawing and its worker threads are gone. The material handoff is unchanged
+- Per-body height maps are built on request (small map Terrain, terrain overlay, the body shown in the big map) instead of walking every body at scene start
+- The zoom map and RPM fit their palette range inside the map build instead of a synchronous terrain sweep before every pan or zoom; the zoom legend lists the biomes from the built map
+- The big map's graticule is drawn by the map shader
 - Maps render on the GPU everywhere: big map, zoom map, small map and RPM, in every mode. The per-row CPU renderers are gone; a pass builds its data under a per-frame CPU budget (Map Generation Speed) and reveals with a one-second sweep
 - Fixed the big map wiping its height cache on every open, which made every reopen re-sample the whole terrain
 - Biome maps cache the biome index per body, so repeated Biome passes no longer re-sample every pixel

@@ -50,12 +50,6 @@ namespace SCANsat.SCAN_Unity
 
 		private bool initialized;
 
-		private float terrainMin;
-		private float terrainMax;
-
-		private float resourceMin;
-		private float resourceMax;
-
 		private SCANresourceGlobal currentResource;
 		private List<SCANresourceGlobal> resources;
 
@@ -259,6 +253,7 @@ namespace SCANsat.SCAN_Unity
 			if (spotmap == null)
 			{
 				spotmap = new SCANmap(body, mapSource.ZoomMap);
+				spotmap.AutoRange = true;   // palette range fitted to the window by the map's own pre-pass (was calcTerrainLimits here)
 
 				mapType t = mapType.Altimetry;
 
@@ -357,8 +352,6 @@ namespace SCANsat.SCAN_Unity
 
 			spotmap.centerAround(lon, lat);
 
-			calcTerrainLimits();
-
 			mapType t = mapType.Altimetry;
 
 			try
@@ -411,8 +404,6 @@ namespace SCANsat.SCAN_Unity
 				checkForScanners();
 			}
 
-			calcTerrainLimits();
-
 			rebuilding = true;
 
 			spotmap.resetMap(ResourceToggle, narrowBand);
@@ -454,111 +445,6 @@ namespace SCANsat.SCAN_Unity
 			}
 
 			resetMap(true, SCANUtil.fixLatShift(vessel.latitude), SCANUtil.fixLonShift(vessel.longitude));
-		}
-
-		protected void calcTerrainLimits()
-		{
-			bool terrainCalc = spotmap.MType == mapType.Altimetry || spotmap.MType == mapType.Biome;
-
-			int w = spotmap.MapWidth / 4;
-			int h = spotmap.MapHeight / 4;
-
-			resourceMax = 0;
-			resourceMin = 100;
-
-			terrainMax = -200000;
-			terrainMin = 100000;
-
-			for (int i = 0; i < spotmap.MapHeight; i += 4)
-			{
-				for (int j = 0; j < spotmap.MapWidth; j += 4)
-				{
-					double lat = (i * 1.0f / spotmap.MapScale) - 90f + spotmap.Lat_Offset;
-					double lon = (j * 1.0f / spotmap.MapScale) - 180f + spotmap.Lon_Offset;
-					double la = lat, lo = lon;
-					lat = spotmap.unprojectLatitude(lo, la);
-					lon = spotmap.unprojectLongitude(lo, la);
-
-					if (double.IsNaN(lon) || double.IsNaN(lat) || lon < -180 || lon >= 180 || lat < -90 && lat >= 90)
-					{
-						continue;
-					}
-
-					if (terrainCalc)
-					{
-						float terrain = (float)SCANUtil.getElevation(body, lon, lat);
-
-						if (terrain < terrainMin)
-						{
-							terrainMin = terrain;
-						}
-
-						if (terrain > terrainMax)
-						{
-							terrainMax = terrain;
-						}
-					}
-
-					if (currentResource != null)
-					{
-						float resource = SCANUtil.ResourceOverlay(lat, lon, currentResource.Name, body, SCAN_Settings_Config.Instance.BiomeLock) * 100f;
-
-						if (resource < resourceMin)
-						{
-							resourceMin = resource;
-						}
-
-						if (resource > resourceMax)
-						{
-							resourceMax = resource;
-						}
-						//SCANUtil.SCANlog("Check Location: Lat: {3} x Long: {4}\nResource: {0} - Min: {1} - Max: {2}"
-						//    , resource.ToString("F2"), resourceMin.ToString("F2"), resourceMax.ToString("F2"), lat.ToString("F2"), lon.ToString("F2") );
-					}
-					else
-					{
-						resourceMax = 100;
-						resourceMin = 0;
-					}
-				}
-			}
-
-			if (terrainMin > terrainMax)
-			{
-				terrainMin = terrainMax - 1f;
-			}
-
-			if (terrainMin == terrainMax)
-			{
-				terrainMin = terrainMax - 1f;
-			}
-
-			if (currentResource != null && currentResource.CurrentBody != null && resourceMin < currentResource.CurrentBody.MinValue)
-			{
-				resourceMin = currentResource.CurrentBody.MinValue;
-			}
-
-			if (resourceMin >= resourceMax)
-			{
-				resourceMax = resourceMin + 1f;
-			}
-
-			if (resourceMin < 0)
-			{
-				resourceMin = 0;
-			}
-
-			if (currentResource != null && currentResource.CurrentBody != null && resourceMax > currentResource.CurrentBody.MaxValue)
-			{
-				resourceMax = currentResource.CurrentBody.MaxValue;
-			}
-
-			if (resourceMin >= resourceMax)
-			{
-				resourceMin = resourceMax - 1f;
-			}
-
-			spotmap.setCustomRange(terrainMin, terrainMax, resourceMin, resourceMax);
 		}
 
 		private void checkForScanners()
@@ -751,6 +637,7 @@ namespace SCANsat.SCAN_Unity
 				rebuilding = false;
 
 				uiElement.ResetRefresh();
+				uiElement.SetLegends(LegendToggle);   // the palette range and the biome list come from the finished pass
 			}
 
 			if (OrbitToggle && ShowOrbit)
@@ -1647,48 +1534,16 @@ namespace SCANsat.SCAN_Unity
 					case mapType.Biome:
 						if (body != null && body.BiomeMap != null && body.BiomeMap.Attributes != null)
 						{
-							biomes = new List<CBAttributeMapSO.MapAttribute>();
+							// The biomes in view come from the pass's biome index cache (every pixel, no extra
+							// lookups). Until the first rows of a new window are built, keep the previous legend.
+							List<CBAttributeMapSO.MapAttribute> inView = spotmap.BiomesInView();
 
-							int w = spotmap.MapWidth / 4;
-							int h = spotmap.MapHeight / 4;
-
-							for (int i = 0; i < spotmap.MapHeight; i += 4)
+							if (inView == null)
 							{
-								for (int j = 0; j < spotmap.MapWidth; j += 4)
-								{
-									double lon = spotmap.Lon_Offset + (j * 1.0f / spotmap.MapScale) - 180;
-									double lat = spotmap.Lat_Offset + (i * 1.0f / spotmap.MapScale) - 90;
-									double la = lat, lo = lon;
-									lat = spotmap.unprojectLatitude(lo, la);
-									lon = spotmap.unprojectLongitude(lo, la);
-
-									if (lon < -180 || lon >= 180 || lat < -90 && lat >= 90 || double.IsNaN(lon) || double.IsNaN(lat))
-									{
-										continue;
-									}
-
-									CBAttributeMapSO.MapAttribute biome = SCANUtil.getBiome(body, lon, lat);
-
-									bool add = true;
-
-									for (int b = biomes.Count - 1; b >= 0; b--)
-									{
-										if (biome != biomes[b])
-										{
-											continue;
-										}
-
-										add = false;
-										break;
-									}
-
-									if (add)
-									{
-										biomes.Add(biome);
-									}
-								}
+								return spotmap.MapLegend.Legend;
 							}
 
+							biomes = inView;
 
 							return spotmap.MapLegend.getLegend(data, SCANcontroller.controller.zoomMapColor, SCAN_Settings_Config.Instance.BigMapStockBiomes, biomes.ToArray(), true);
 						}
@@ -1757,7 +1612,7 @@ namespace SCANsat.SCAN_Unity
 		{
 			get
 			{
-				return SCANmapLegend.LegendLabels(terrainMin, terrainMax);
+				return SCANmapLegend.LegendLabels(spotmap.CustomMin, spotmap.CustomMax);   // the range the map fitted to its window
 			}
 		}
 
@@ -1882,7 +1737,7 @@ namespace SCANsat.SCAN_Unity
 
 		public Vector2 ResourceLegendLabels
 		{
-			get { return new Vector2(resourceMin / 100f, resourceMax / 100f); }
+			get { return new Vector2(spotmap.CustomResourceMin / 100f, spotmap.CustomResourceMax / 100f); }
 		}
 
 		public Dictionary<string, MapLabelInfo> OrbitLabelList
@@ -2344,7 +2199,7 @@ namespace SCANsat.SCAN_Unity
 
 					return Localizer.Format(biomes[current].displayname);
 				case mapType.Altimetry:
-					float terrain = xPos * (terrainMax - terrainMin) + terrainMin;
+					float terrain = xPos * (spotmap.CustomMax - spotmap.CustomMin) + spotmap.CustomMin;
 
 					return string.Format("{0}m", terrain.ToString("N0"));
 			}
