@@ -731,23 +731,16 @@ namespace SCANsat.SCAN_Map
 			private bool gpuDataComplete;   // the non-Visual data cache is fully sampled for gpuDataHash's config
 			private int gpuDataHash;        // config (body/mode/projection/size/offsets) the cached data is valid for
 			private bool gpuRecolorSweep;   // cosmetic re-sweep in progress: re-Blit cached data with a new LUT (no re-sample)
-		// The GPU compositor draws the whole Visual map in one Blit; these drive a purely
-		// cosmetic scanline reveal (in the CPU path's row order) so it matches the CPU modes' look.
-		// sweepStep advances one row per getPartialMap call (the pump calls it MapGenerationSpeed
-		// times per frame, exactly like the CPU one-line-per-call cadence); gpuSweepDone gates
-		// isMapComplete so the pump keeps re-compositing until the reveal finishes.
+		// The GPU compositor draws the whole Visual map in one Blit; the scanline is a purely cosmetic
+		// reveal (in the CPU path's row order) so it matches the CPU modes' look. Visual and the
+		// recolour re-sweep have their end state on the first Blit, so their line is paced by wall-clock
+		// time (SweepDuration) rather than by pump calls: a pass takes the same second on any map size,
+		// frame rate or MapGenerationSpeed. The data modes build row by row, so their line tracks
+		// mapstep instead. gpuSweepDone gates isMapComplete so the pump keeps re-compositing until the
+		// reveal finishes.
 		private bool gpuSweepDone;
-		private int sweepStep;
-		// False for a live display (the small main map): every pass is one fully revealed Blit with
-		// no scanline, like the classic small map. The pass cadence (sweepStep) is unchanged, so the
-		// coverage stencil is still refreshed once per pass rather than every frame.
-		private bool cosmeticSweep = true;
-
-		internal bool CosmeticSweep
-		{
-			get { return cosmeticSweep; }
-			set { cosmeticSweep = value; }
-		}
+		private float sweepStart = -1f;   // realtimeSinceStartup at this pass's first composite; -1 until then
+		private const float SweepDuration = 1f;
 
 		/* MAP: nearly trivial functions */
 		public void setBody(CelestialBody b)
@@ -851,7 +844,7 @@ namespace SCANsat.SCAN_Map
 			mapstep = -2;
 			gpuRendered = false;
 			gpuSweepDone = false;
-			sweepStep = 0;
+			sweepStart = -1f;
 			resourceTexReady = false;
 			resourceCacheReady = false;
 			coverageFlagsDirty = true;   // new pass: refresh the GPU coverage stencil once from live coverage
@@ -1091,31 +1084,41 @@ namespace SCANsat.SCAN_Map
 				compositeMaterial.SetFloat("_MapMode", (float)(int)mType);
 				setModeUniforms();
 
-			// Advance the cosmetic scanline one row per call, matching the CPU path's one-line-
-			// per-call cadence (mapstep++). We re-composite with the reveal fraction each call so
-			// the RawImage - already pointed at visualRenderTex - animates in place. Rows ahead of the
-			// line keep the previous pass (shader discard); the RT was filled with the background only
-			// when created, like the CPU path's fresh Texture2D. Redline = palette.Red.
-			if (mType == mapType.Visual && !gpuSweepDone)
-			{
-				sweepStep++;
-				if (sweepStep >= mapheight)
-					gpuSweepDone = true;
-			}
+			// Cosmetic reveal fraction. Re-compositing each frame with a new fraction animates the
+			// RawImage - already pointed at visualRenderTex - in place. Rows ahead of the line keep the
+			// previous pass (shader discard); the RT was filled with the background only when created,
+			// like the CPU path's fresh Texture2D. Redline = palette.Red.
+			bool timedSweep = mType == mapType.Visual || gpuRecolorSweep;   // end state already known: flair, paced by time
+			float reveal = 1f;
+			if (mapheight > 0)
+				reveal = timedSweep ? timedSweepFraction() : Mathf.Clamp01((mapstep + 1f) / mapheight);
 
 			Color background = SCAN_Settings_Config.Instance.MapBackgroundColor;
 			background.a *= SCAN_Settings_Config.Instance.BackgroundTransparency;
 			compositeMaterial.SetColor("_MapBackgroundColor", background);
 			compositeMaterial.SetColor("_RedlineColor", palette.Red);
-			float gpuSweepRow = mType == mapType.Visual ? sweepStep : mapstep + 1;
-			compositeMaterial.SetFloat("_SweepY", cosmeticSweep && mapheight > 0 ? Mathf.Clamp01(gpuSweepRow / mapheight) : 1f);
+			compositeMaterial.SetFloat("_SweepY", reveal);
 
 			Graphics.Blit(null, visualRenderTex, compositeMaterial);
 
 			gpuRendered = true;                       // DisplayTexture returns the RT during the sweep
-			if (mType == mapType.Visual && gpuSweepDone)
+			if (timedSweep && reveal >= 1f)
+			{
+				gpuSweepDone = true;                  // that Blit was the fully revealed one (no redline)
 				mapstep = mapheight;                  // mark complete for the legacy mapstep-based checks
+			}
 			return true;
+		}
+
+		// Wall-clock reveal fraction for a sweep whose end state is already rendered. The clock starts
+		// at the pass's first composite, not at resetMap, so a map reset while hidden still plays its
+		// sweep when shown. Real time: physics warp scales Time.deltaTime, and the UI runs while paused.
+		private float timedSweepFraction()
+		{
+			float now = Time.realtimeSinceStartup;
+			if (sweepStart < 0f)
+				sweepStart = now;
+			return Mathf.Clamp01((now - sweepStart) / SweepDuration);
 		}
 
 		/// <summary>
@@ -1477,8 +1480,12 @@ namespace SCANsat.SCAN_Map
 				return new Texture2D(1, 1);
 			}
 
-			if (mType == mapType.Visual && tryRenderGPU())
+			if (mType == mapType.Visual && willRenderGPU(mapType.Visual))
 			{
+				// One composite per frame, on the pump's apply call. The pump's extra calls per frame are
+				// the CPU path's row cadence; the GPU sweep is paced by time in tryRenderGPU, not by calls.
+				if (apply)
+					tryRenderGPU();
 				return map;
 			}
 
@@ -1489,15 +1496,14 @@ namespace SCANsat.SCAN_Map
 				primeGpuRenderTex();
 
 			// Cosmetic re-sweep after a colour-only change: the data textures are already uploaded, so
-			// skip the whole prep/CPU loop and just re-Blit each frame with the rebuilt LUT while the
-			// sweep reveal advances - keeps the sweep charm with no PQS re-sample and no re-processing.
+			// skip the whole prep/CPU loop and just re-Blit once per frame with the rebuilt LUT while the
+			// timed reveal advances - keeps the sweep charm with no PQS re-sample and no re-processing.
 			if (gpuRecolorSweep)
 			{
-				tryRenderGPU();
-				mapstep++;
-				if (mapstep >= mapheight)
+				if (apply)
+					tryRenderGPU();   // sets gpuSweepDone on the fully revealed Blit
+				if (gpuSweepDone)
 				{
-					gpuSweepDone = true;
 					gpuRecolorSweep = false;
 					gpuDataComplete = true;
 					gpuDataHash = gpuConfigHash();
@@ -1575,11 +1581,12 @@ namespace SCANsat.SCAN_Map
 				}
 			}
 
-			// The CPU path only needs biomeIndex when drawing biome borders (it colourises from
-			// stockBiomeColor); the GPU path colourises stock biomes from _BiomeLUT[biomeIndex], so
-			// it needs biomeIndex filled every pixel regardless of the border toggle. Without this
-			// the GPU biome map reads index 0 everywhere and draws a single flat colour.
-			bool gpuBiomeNeedsIndex = willRenderGPU(mapType.Biome);
+			// The CPU path colourises stock biomes from stockBiomeColor and needs biomeIndex only for
+			// borders; the GPU path colourises from _BiomeLUT[biomeIndex] and never reads stockBiomeColor
+			// (only the CPU colourize loop does). So the GPU path fills biomeIndex for every pixel
+			// regardless of the border toggle - without it the GPU biome map reads index 0 everywhere and
+			// draws one flat colour - and skips getBiome, which would be a second GetAtt per pixel for nothing.
+			bool gpuBiome = willRenderGPU(mapType.Biome);
 
 			for (int i = 0; i < mapwidth; i++)
 			{
@@ -1633,14 +1640,18 @@ namespace SCANsat.SCAN_Map
 					continue;
 				}
 
-				if (SCAN_Settings_Config.Instance.BigMapStockBiomes && colorMap)
+				if (gpuBiome || !(SCAN_Settings_Config.Instance.BigMapStockBiomes && colorMap))
+				{
+					biomeIndex[i] = SCANUtil.getBiomeIndexFraction(body, lon, lat);
+				}
+				else
 				{
 					stockBiomeColor[i] = SCANUtil.getBiome(body, lon, lat).mapColor;
 
 					switch (mSource)
 					{
 						case mapSource.BigMap:
-							if (SCAN_Settings_Config.Instance.BigMapBiomeBorder || gpuBiomeNeedsIndex)
+							if (SCAN_Settings_Config.Instance.BigMapBiomeBorder)
 							{
 								biomeIndex[i] = SCANUtil.getBiomeIndexFraction(body, lon, lat);
 							}
@@ -1648,17 +1659,13 @@ namespace SCANsat.SCAN_Map
 							break;
 						case mapSource.ZoomMap:
 						case mapSource.RPM:
-							if (SCAN_Settings_Config.Instance.ZoomMapBiomeBorder || gpuBiomeNeedsIndex)
+							if (SCAN_Settings_Config.Instance.ZoomMapBiomeBorder)
 							{
 								biomeIndex[i] = SCANUtil.getBiomeIndexFraction(body, lon, lat);
 							}
 
 							break;
 					}
-				}
-				else
-				{
-					biomeIndex[i] = SCANUtil.getBiomeIndexFraction(body, lon, lat);
 				}
 			}
 
@@ -1693,7 +1700,10 @@ namespace SCANsat.SCAN_Map
 					if (mapstep == 0) uploadDataRow(elevationTex, big_heightmap, 0);
 					uploadDataRow(elevationTex, big_heightmap, mapstep + 1);
 				}
-				tryRenderGPU();
+				// One composite per frame (the pump's apply call), plus the pass's last row so the fully
+				// revealed Blit always happens. The row uploads above still run on every call.
+				if (apply || mapstep + 1 >= mapheight)
+					tryRenderGPU();
 				mapstep++;
 				if (mapstep >= mapheight)
 				{
