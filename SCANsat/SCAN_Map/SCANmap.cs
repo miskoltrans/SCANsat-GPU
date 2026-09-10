@@ -748,7 +748,9 @@ namespace SCANsat.SCAN_Map
 			SCANcontroller.controller.unloadPQS(body, mSource);
 			SCANcontroller.controller.unloadOnDemandScaledSpace(body, mSource);
 
-			if (body != b)
+			bool bodyChanged = body != b;
+
+			if (bodyChanged)
 			{
 				SCANcontroller.controller.UnloadVisualMapTexture(body, mSource);
 				body = b;
@@ -768,16 +770,13 @@ namespace SCANsat.SCAN_Map
 			pqs = body.pqsController != null;
 			biomeMap = body.BiomeMap != null;
 
-			/* clear cache in place if necessary */
-			if (cache)
+			// The height cache is per body: terrain does not change at runtime, and new coverage is
+			// picked up per pixel by the "unsampled" check. So it survives same-body calls (the big map
+			// calls setBody on every open) and clears only when the body actually changes.
+			if (cache && bodyChanged)
 			{
-				for (int x = 0; x < mapwidth; x++)
-				{
-					for (int y = 0; y < mapwidth / 2; y++)
-					{
-						big_heightmap[x, y] = 0f;
-					}
-				}
+				if (big_heightmap != null)
+					System.Array.Clear(big_heightmap, 0, big_heightmap.Length);
 			}
 
 			if (SCANconfigLoader.GlobalResource)
