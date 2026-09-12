@@ -137,7 +137,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 			float _RowMin;
 			float _RowMax;
 
-			float _Grid;        // 1: the small map's dotted 30-degree graticule; 2: the big map's 30-degree lines with a black outline
+			float _Grid;        // 1: the small map's dotted 30-degree graticule
 			float _HasSource;   // Visual: 0 when there is no colour texture for the body -> whole map _UnscannedColor (the old CPU fallback)
 			float _BaseNone;    // 1: no base layer at all, every pixel starts as _UnscannedColor (the resource-only planet overlay)
 			float _OutputAlpha; // final multiplier on the whole colour (the terrain planet overlay is 90 percent)
@@ -473,36 +473,11 @@ Shader "Hidden/SCANsat/VisualComposite"
 					}
 				}
 
-				if (_Grid > 1.5)
-				{
-					// The big map's graticule texture (was SCAN_UI_BigMap.GenerateGridMap, drawn on the UI's
-					// grid layer above the map): along every 30-degree meridian and parallel, a white dot at
-					// each whole 2 degrees with a black pixel on its four sides. Reproduced per pixel from the
-					// pixel's geographic lon/lat: within half a pixel of a lattice point is the dot, within a
-					// pixel and a half along one axis is its black cross. The 2-degree lattice is measured
-					// from -180 / -90 as the CPU loop did; its top row (lat 90) and right edge (lon 180) were
-					// not drawn. The derivative blows up at the seam and the poles, both grid lines; cap it.
-					float2 dl = min(float2(fwidth(lon), fwidth(lat)), float2(2.0, 2.0));
-					float lonD30 = abs(lon - 30.0 * round(lon / 30.0));
-					float latD30 = abs(lat - 30.0 * round(lat / 30.0));
-					float lonD2 = abs(lon - 2.0 * round(lon / 2.0));
-					float latD2 = abs(lat - 2.0 * round(lat / 2.0));
-					bool inRange = lat < 89.9 && lon < 179.9;
-					bool onMeridian = lonD30 < dl.x * 0.5;
-					bool onParallel = latD30 < dl.y * 0.5;
-					bool dot = inRange && ((onMeridian && latD2 < dl.y * 0.5) || (onParallel && lonD2 < dl.x * 0.5));
-					bool cross = inRange && (
-						(lonD30 < dl.x * 1.5 && latD2 < dl.y * 0.5) || (onMeridian && latD2 < dl.y * 1.5) ||
-						(latD30 < dl.y * 1.5 && lonD2 < dl.x * 0.5) || (onParallel && lonD2 < dl.x * 1.5));
-					if (dot)
-						col = float4(1.0, 1.0, 1.0, 1.0);
-					else if (cross)
-						col = float4(0.0, 0.0, 0.0, 1.0);
-				}
-				else if (_Grid > 0.5)
+				if (_Grid > 0.5)
 				{
 					// The small map's dotted 30-degree graticule (was SCAN_UI_MainMap.getMapPixelColor): a white
-					// dot every 3rd pixel along each 30-degree row and column. Applied before the terminator, as there.
+					// dot every 3rd pixel along each 30-degree row and column. Applied before the terminator, as
+					// there. (The big map's graticule is a separate texture drawn point by point: SCANmap.renderGrid.)
 					if ((fmod(pix.y, 30.0) < 0.5 && fmod(pix.x, 3.0) < 0.5) || (fmod(pix.x, 30.0) < 0.5 && fmod(pix.y, 3.0) < 0.5))
 						col = float4(1.0, 1.0, 1.0, 1.0);
 				}

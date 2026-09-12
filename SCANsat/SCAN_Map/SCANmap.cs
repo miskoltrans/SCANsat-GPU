@@ -1201,44 +1201,73 @@ namespace SCANsat.SCAN_Map
 		}
 
 		// The big map's graticule as a texture for the UI's grid layer, which sits above the map with
-		// the layer's own colour and alpha exactly as the CPU-drawn one did: a grid-only composite in
-		// this map's projection, read back once into a Texture2D (reuse when the size fits). The caller
-		// re-renders on projection and size changes. Self-contained: sets every uniform it needs, so it
-		// works before the map's first composite too.
+		// the layer's own colour and alpha exactly as before. Same pattern, same placement as the old
+		// CPU GenerateGridMap: every 2 degrees along each 30-degree meridian and parallel, the lattice
+		// point is projected with this map's own projection, truncated to a pixel, and that pixel is
+		// white with a black pixel on each of its four sides - here as GL quads rasterised by the GPU
+		// into a RenderTexture, then read back once into a Texture2D (reused when the size fits). The
+		// caller re-renders on projection and size changes. Rectangular, Kavrayskiy and Polar only,
+		// the projections the big map offers.
 		internal Texture2D renderGrid(Texture2D reuse)
 		{
-			Shader shader = SCAN_UI_Loader.VisualCompositeShader;
-
-			if (shader == null || mapwidth <= 0 || mapheight <= 0)
+			if (mapwidth <= 0 || mapheight <= 0)
 			{
 				return null;
 			}
 
-			if (compositeMaterial == null || compositeMaterial.shader != shader)
-				compositeMaterial = new Material(shader);
+			Material mat = JUtil.DrawLineMaterial();   // the shared vertex-colour GL material (RPM's trails use it too)
 
-			compositeMaterial.SetFloat("_MapWidth", mapwidth);
-			compositeMaterial.SetFloat("_MapHeight", mapheight);
-			compositeMaterial.SetFloat("_MapScale", (float)mapscale);
-			compositeMaterial.SetFloat("_LonOffset", (float)lon_offset);
-			compositeMaterial.SetFloat("_LatOffset", (float)lat_offset);
-			compositeMaterial.SetFloat("_Projection", (float)(int)projection);
-			compositeMaterial.SetFloat("_CenteredLon", (float)centeredLong);
-			compositeMaterial.SetFloat("_CenteredLat", (float)centeredLat);
-			compositeMaterial.SetFloat("_FlipY", 0f);
-			compositeMaterial.SetFloat("_RowMin", 0f);
-			compositeMaterial.SetFloat("_RowMax", mapheight - 1);
-			compositeMaterial.SetFloat("_SweepY", 1f);
-			compositeMaterial.SetFloat("_BaseNone", 1f);
-			compositeMaterial.SetFloat("_ResourceActive", 0f);
-			compositeMaterial.SetFloat("_Terminator", 0f);
-			compositeMaterial.SetFloat("_OutputAlpha", 1f);
-			compositeMaterial.SetFloat("_Grid", 2f);
-			compositeMaterial.SetColor("_UnscannedColor", palette.Clear);
-			compositeMaterial.SetColor("_ClearColor", palette.Clear);
+			if (mat == null)
+			{
+				return null;
+			}
 
 			RenderTexture rt = RenderTexture.GetTemporary(mapwidth, mapheight, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
-			Graphics.Blit(null, rt, compositeMaterial);
+			RenderTexture prev = RenderTexture.active;
+			RenderTexture.active = rt;
+
+			GL.Clear(false, true, palette.clear);
+			GL.PushMatrix();
+			GL.LoadPixelMatrix(0, mapwidth, 0, mapheight);   // pixel (x, y), row 0 at the bottom like Texture2D.SetPixels
+			mat.SetPass(0);
+			GL.Begin(GL.QUADS);
+
+			for (double lat = -90; lat < 90; lat += 2)
+			{
+				for (double lon = -180; lon < 180; lon += 2)
+				{
+					if (lat % 30 != 0 && lon % 30 != 0)
+					{
+						continue;
+					}
+
+					double px = mapscale * ((projectLongitude(lon, lat) + 180) % 360);
+					double py = mapscale * ((projectLatitude(lon, lat) + 90) % 180);
+
+					if (double.IsNaN(px) || double.IsNaN(py))
+					{
+						continue;
+					}
+
+					int x = (int)px;
+					int y = (int)py;
+
+					if (x < 0 || x >= mapwidth || y < 0 || y >= mapheight)
+					{
+						continue;
+					}
+
+					gridPixel(x, y, palette.white);
+
+					if (x < mapwidth - 1) gridPixel(x + 1, y, palette.black);
+					if (x > 0) gridPixel(x - 1, y, palette.black);
+					if (y < mapheight - 1) gridPixel(x, y + 1, palette.black);
+					if (y > 0) gridPixel(x, y - 1, palette.black);
+				}
+			}
+
+			GL.End();
+			GL.PopMatrix();
 
 			Texture2D tex = reuse;
 
@@ -1249,15 +1278,22 @@ namespace SCANsat.SCAN_Map
 				tex = new Texture2D(mapwidth, mapheight, TextureFormat.ARGB32, false);
 			}
 
-			RenderTexture prev = RenderTexture.active;
-			RenderTexture.active = rt;
 			tex.ReadPixels(new Rect(0, 0, mapwidth, mapheight), 0, 0);
 			tex.Apply();
 			RenderTexture.active = prev;
 			RenderTexture.ReleaseTemporary(rt);
 
-			// The next composite resets every uniform, so nothing set here needs restoring.
 			return tex;
+		}
+
+		// One map pixel as a GL quad (pixel matrix: x, y in pixels).
+		private static void gridPixel(int x, int y, Color c)
+		{
+			GL.Color(c);
+			GL.Vertex3(x, y, 0f);
+			GL.Vertex3(x + 1, y, 0f);
+			GL.Vertex3(x + 1, y + 1, 0f);
+			GL.Vertex3(x, y + 1, 0f);
 		}
 
 		// Wall-clock reveal fraction for a sweep whose end state is already rendered. The clock starts
@@ -1916,11 +1952,16 @@ namespace SCANsat.SCAN_Map
 								onMap = !(double.IsNaN(sampleLat) || double.IsNaN(sampleLon) || sampleLat < -90 || sampleLat > 90 || sampleLon < -180 || sampleLon > 180);
 							}
 
-							if (onMap && SCANUtil.isCovered(sampleLon, sampleLat, data, SCANtype.Altimetry))
+							if (onMap)
 							{
+								// The prebuilt grid has every cell, so fill them all: the shader stencils by coverage
+								// anyway, and a map that is upsampled from this texture (the terrain overlay, 4 output
+								// pixels per texel) would otherwise blend real heights with the zeros of uncovered
+								// neighbours into dark fringes along every coverage edge. PQS is sampled for covered
+								// pixels only, as ever.
 								if (usesHeightGrid())
 									gridHeightToArray(i, lookAhead);   // one pixel per degree: the body's prebuilt height map, no PQS
-								else
+								else if (SCANUtil.isCovered(sampleLon, sampleLat, data, SCANtype.Altimetry))
 									terrainHeightToArray(sampleLon, sampleLat, i, lookAhead);
 							}
 						}
