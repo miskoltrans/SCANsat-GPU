@@ -211,12 +211,6 @@ namespace SCANsat.SCAN_Map
 			set { baseNone = value; }
 		}
 
-		internal bool GridLines
-		{
-			get { return gridLines; }
-			set { gridLines = value; }
-		}
-
 		internal bool AutoRange
 		{
 			get { return autoRange; }
@@ -813,7 +807,6 @@ namespace SCANsat.SCAN_Map
 		private bool sweepEnabled = true;    // false: no timed reveal, the pass is complete when the build is (planet overlay)
 		private bool biomeUnderlay = true;   // false: Biome samples no elevation for its underlay (small map, planet overlay)
 		private bool baseNone;               // true: no base layer, only the resource pass over clear (resource planet overlay)
-		private bool gridLines;              // true: the big map's 30-degree graticule, drawn by the shader
 		private bool autoRange;              // true: palette range fitted to the window's own samples (zoom map, RPM)
 		private float outputAlpha = 1f;      // final multiplier on the composite (terrain planet overlay: 0.9)
 		private float resGreyBlend = 0.3f;   // resourceToColor32's Transparency argument for below-range cells
@@ -1145,7 +1138,7 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetFloat("_ResPixelSpace", (!geographicCache || projection == MapProjection.Orthographic) ? 1f : 0f);
 			compositeMaterial.SetFloat("_RowMin", startLine);
 			compositeMaterial.SetFloat("_RowMax", stopLine);
-			compositeMaterial.SetFloat("_Grid", mSource == mapSource.Data ? 1f : (gridLines ? 2f : 0f));   // 1 the small map's dots, 2 the big map's lines
+			compositeMaterial.SetFloat("_Grid", mSource == mapSource.Data ? 1f : 0f);   // the small map's dotted graticule; the big map's is a separate texture (renderGrid)
 			compositeMaterial.SetFloat("_HasSource", colorTex != null ? 1f : 0f);
 			compositeMaterial.SetFloat("_NoData", gpuNoData() ? 1f : 0f);
 			compositeMaterial.SetFloat("_NoiseSeed", noiseSeed);
@@ -1207,14 +1200,64 @@ namespace SCANsat.SCAN_Map
 			return true;
 		}
 
-		// Composite once more with the current uniforms, without a new pass: for a display toggle that
-		// only the shader needs to know about (the big map's graticule). No-op before the first render.
-		internal void refreshComposite()
+		// The big map's graticule as a texture for the UI's grid layer, which sits above the map with
+		// the layer's own colour and alpha exactly as the CPU-drawn one did: a grid-only composite in
+		// this map's projection, read back once into a Texture2D (reuse when the size fits). The caller
+		// re-renders on projection and size changes. Self-contained: sets every uniform it needs, so it
+		// works before the map's first composite too.
+		internal Texture2D renderGrid(Texture2D reuse)
 		{
-			if (gpuRendered && willRenderGPU(mType))
+			Shader shader = SCAN_UI_Loader.VisualCompositeShader;
+
+			if (shader == null || mapwidth <= 0 || mapheight <= 0)
 			{
-				tryRenderGPU();
+				return null;
 			}
+
+			if (compositeMaterial == null || compositeMaterial.shader != shader)
+				compositeMaterial = new Material(shader);
+
+			compositeMaterial.SetFloat("_MapWidth", mapwidth);
+			compositeMaterial.SetFloat("_MapHeight", mapheight);
+			compositeMaterial.SetFloat("_MapScale", (float)mapscale);
+			compositeMaterial.SetFloat("_LonOffset", (float)lon_offset);
+			compositeMaterial.SetFloat("_LatOffset", (float)lat_offset);
+			compositeMaterial.SetFloat("_Projection", (float)(int)projection);
+			compositeMaterial.SetFloat("_CenteredLon", (float)centeredLong);
+			compositeMaterial.SetFloat("_CenteredLat", (float)centeredLat);
+			compositeMaterial.SetFloat("_FlipY", 0f);
+			compositeMaterial.SetFloat("_RowMin", 0f);
+			compositeMaterial.SetFloat("_RowMax", mapheight - 1);
+			compositeMaterial.SetFloat("_SweepY", 1f);
+			compositeMaterial.SetFloat("_BaseNone", 1f);
+			compositeMaterial.SetFloat("_ResourceActive", 0f);
+			compositeMaterial.SetFloat("_Terminator", 0f);
+			compositeMaterial.SetFloat("_OutputAlpha", 1f);
+			compositeMaterial.SetFloat("_Grid", 2f);
+			compositeMaterial.SetColor("_UnscannedColor", palette.Clear);
+			compositeMaterial.SetColor("_ClearColor", palette.Clear);
+
+			RenderTexture rt = RenderTexture.GetTemporary(mapwidth, mapheight, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
+			Graphics.Blit(null, rt, compositeMaterial);
+
+			Texture2D tex = reuse;
+
+			if (tex == null || tex.width != mapwidth || tex.height != mapheight)
+			{
+				if (tex != null)
+					UnityEngine.Object.Destroy(tex);
+				tex = new Texture2D(mapwidth, mapheight, TextureFormat.ARGB32, false);
+			}
+
+			RenderTexture prev = RenderTexture.active;
+			RenderTexture.active = rt;
+			tex.ReadPixels(new Rect(0, 0, mapwidth, mapheight), 0, 0);
+			tex.Apply();
+			RenderTexture.active = prev;
+			RenderTexture.ReleaseTemporary(rt);
+
+			// The next composite resets every uniform, so nothing set here needs restoring.
+			return tex;
 		}
 
 		// Wall-clock reveal fraction for a sweep whose end state is already rendered. The clock starts

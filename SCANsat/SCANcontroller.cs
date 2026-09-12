@@ -1219,6 +1219,10 @@ namespace SCANsat
 					body_data.Add(FlightGlobals.currentMainBody.bodyName, new SCANdata(FlightGlobals.currentMainBody));
 				}
 
+				// The body the vessel is at is the one the small map, the overlay and the big map open on;
+				// have its height map ready (a few seconds in the background) instead of walking every body.
+				RequestHeightMap(body_data[FlightGlobals.currentMainBody.bodyName]);
+
 				try
 				{
 					_mainMap = new SCAN_UI_MainMap();
@@ -1442,7 +1446,7 @@ namespace SCANsat
 
 			if (buildingData.ControllerBuilding)
 			{
-				buildingData.generateHeightMap(ref dataStep, ref dataStart, 120);
+				buildingData.generateHeightMap(ref dataStep, ref dataStart, 360);   // one body on demand: the windows' own pump rate, about three seconds
 				return;
 			}
 
@@ -2473,6 +2477,8 @@ namespace SCANsat
 			{
 				body_data.Add(VC.to.bodyName, new SCANdata(VC.to));
 			}
+
+			RequestHeightMap(body_data[VC.to.bodyName]);
 		}
 
 		private string saveResources(SCANresourceGlobal resource)

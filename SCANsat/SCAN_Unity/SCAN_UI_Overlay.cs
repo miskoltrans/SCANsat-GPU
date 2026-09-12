@@ -712,6 +712,10 @@ namespace SCANsat.SCAN_Unity
 				SCANcontroller.controller.addToBodyData(body, data);
 			}
 
+			// The terrain overlay reads the body's height map; start it now so it is ready by the time
+			// terrain is picked, instead of a few seconds of nothing while it builds on demand.
+			SCANcontroller.controller.RequestHeightMap(data);
+
 			if (currentResource == null)
 			{
 				if (resources.Count > 0)
@@ -806,16 +810,13 @@ namespace SCANsat.SCAN_Unity
 				removeOverlay();
 			}
 
-			if (mapGenerating)
-			{
-				return;
-			}
-
 			if (i < 0 || i > 2)
 			{
 				return;
 			}
 
+			// A build already in flight is abandoned by the generation counter (removeOverlay bumped it,
+			// and buildOverlay bumps it again), so a quick switch of overlay type starts the new one at once.
 			_overlayOn = true;
 
 			SCANcontroller.controller.StartCoroutine(buildOverlay(i));
@@ -836,11 +837,12 @@ namespace SCANsat.SCAN_Unity
 			{
 				if (data.Body.pqsController == null)
 				{
-					mapGenerating = false;
+					if (build == overlayBuild)
+						mapGenerating = false;
 					yield break;
 				}
 
-				while (!data.Built && timer < 2000)
+				while (!data.Built && timer < 2000 && build == overlayBuild)
 				{
 					if (!data.ControllerBuilding && !data.MapBuilding)
 					{
@@ -860,7 +862,8 @@ namespace SCANsat.SCAN_Unity
 
 				if (timer >= 2000 || build != overlayBuild)
 				{
-					mapGenerating = false;
+					if (build == overlayBuild)
+						mapGenerating = false;
 					yield break;
 				}
 			}
@@ -905,8 +908,7 @@ namespace SCANsat.SCAN_Unity
 			{
 				if (build != overlayBuild)
 				{
-					mapGenerating = false;
-					yield break;
+					yield break;   // a newer build owns mapGenerating now
 				}
 
 				overlayMap.getPartialMap();
@@ -914,9 +916,14 @@ namespace SCANsat.SCAN_Unity
 				yield return null;
 			}
 
+			if (build != overlayBuild)
+			{
+				yield break;
+			}
+
 			mapGenerating = false;
 
-			if (timer >= 20000 || build != overlayBuild || !_overlayOn)
+			if (timer >= 20000 || !_overlayOn)
 			{
 				yield break;
 			}
