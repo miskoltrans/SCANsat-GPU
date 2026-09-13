@@ -908,6 +908,7 @@ namespace SCANsat.SCAN_Map
 			mapstep = -2;
 			gpuRendered = false;
 			gpuSweepDone = false;
+			gpuRecolorSweep = false;   // a recolour in flight ends here; the shortcut below decides afresh. Left set, a mode switch mid-sweep re-Blit the new mode from textures never built for it.
 			sweepStart = -1f;
 			rangeRow = -1;
 			noiseSeed = UnityEngine.Random.value;
@@ -1215,7 +1216,7 @@ namespace SCANsat.SCAN_Map
 				return null;
 			}
 
-			Material mat = JUtil.DrawLineMaterial();   // the shared vertex-colour GL material (RPM's trails use it too)
+			Material mat = gridMaterial();
 
 			if (mat == null)
 			{
@@ -1284,6 +1285,40 @@ namespace SCANsat.SCAN_Map
 			RenderTexture.ReleaseTemporary(rt);
 
 			return tex;
+		}
+
+		// Vertex-colour material for the grid quads. Unity's built-in Internal-Colored writes all four
+		// channels; the KSP particle shader RPM uses for its trails masks alpha out, which left the
+		// read-back grid texture fully transparent. Opaque overwrite, like the CPU's array writes.
+		private static Material gridMat;
+
+		private static Material gridMaterial()
+		{
+			if (gridMat != null)
+			{
+				return gridMat;
+			}
+
+			Shader s = Shader.Find("Hidden/Internal-Colored");
+
+			if (s == null)
+			{
+				s = Shader.Find("UI/Default");
+			}
+
+			if (s == null)
+			{
+				return null;
+			}
+
+			gridMat = new Material(s);
+			gridMat.hideFlags = HideFlags.HideAndDontSave;
+			gridMat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.One);
+			gridMat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.Zero);
+			gridMat.SetInt("_Cull", (int)UnityEngine.Rendering.CullMode.Off);
+			gridMat.SetInt("_ZWrite", 0);
+			gridMat.SetInt("_ZTest", (int)UnityEngine.Rendering.CompareFunction.Always);
+			return gridMat;
 		}
 
 		// One map pixel as a GL quad (pixel matrix: x, y in pixels).
