@@ -970,6 +970,7 @@ namespace SCANsat.SCAN_Unity
 				overlayMap.setProjection(MapProjection.Rectangular);
 				overlayMap.SweepEnabled = false;    // no reveal: the texture is handed over when the build completes
 				overlayMap.BiomeUnderlay = false;   // the biome overlay is flat stock colours
+				overlayMap.PlanetUV = true;         // columns in the planet's UV layout, as the CPU overlays wrote them (fixLon)
 				overlayMap.setWidth(width);
 				overlayMap.setBody(body);
 			}

@@ -211,6 +211,15 @@ namespace SCANsat.SCAN_Map
 			set { baseNone = value; }
 		}
 
+		// The planet overlays: the texture is read by the body's ScaledSpace UVs, whose u runs from
+		// 90 E westward (the old CPU overlays' fixLon). Affects the composite and the per-pixel biome
+		// fill; the geographic elevation and resource textures are read through the true longitude.
+		internal bool PlanetUV
+		{
+			get { return planetUV; }
+			set { planetUV = value; }
+		}
+
 		internal bool AutoRange
 		{
 			get { return autoRange; }
@@ -807,6 +816,7 @@ namespace SCANsat.SCAN_Map
 		private bool sweepEnabled = true;    // false: no timed reveal, the pass is complete when the build is (planet overlay)
 		private bool biomeUnderlay = true;   // false: Biome samples no elevation for its underlay (small map, planet overlay)
 		private bool baseNone;               // true: no base layer, only the resource pass over clear (resource planet overlay)
+		private bool planetUV;               // true: columns in the planet's ScaledSpace UV layout, u = 0 at 90 E and longitude decreasing (planet overlays)
 		private bool autoRange;              // true: palette range fitted to the window's own samples (zoom map, RPM)
 		private float outputAlpha = 1f;      // final multiplier on the composite (terrain planet overlay: 0.9)
 		private float resGreyBlend = 0.3f;   // resourceToColor32's Transparency argument for below-range cells
@@ -1145,6 +1155,7 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetFloat("_NoiseSeed", noiseSeed);
 			compositeMaterial.SetFloat("_SweepBand", 2f);
 			compositeMaterial.SetFloat("_BaseNone", baseNone ? 1f : 0f);
+			compositeMaterial.SetFloat("_PlanetUV", planetUV ? 1f : 0f);
 			compositeMaterial.SetFloat("_OutputAlpha", outputAlpha);
 			compositeMaterial.SetFloat("_ResGreyBlend", resGreyBlend);
 
@@ -1962,9 +1973,15 @@ namespace SCANsat.SCAN_Map
 
 
 				double cacheLat = ((mapstep + 1) * 1.0f / mapscale) - 90f + lat_offset;
-				double lon = (i * 1.0f / mapscale) - 180f + lon_offset;
+				// Column i's longitude: the map's raw grid, or the planet's UV layout for an overlay (the
+				// shader maps its pixels the same way, so the pixel-space biome index lines up).
+				double lon = planetUV ? SCANUtil.fixLonShift(90.0 - (i * 1.0 / mapscale)) : (i * 1.0f / mapscale) - 180f + lon_offset;
 
-				if (mType != mapType.Visual && (mType != mapType.Biome || biomeUnderlay))
+				// Elevation for the planet layout only comes from the geographic height grid (the terrain
+				// overlay); a PQS sample stored by column would land at the wrong longitude.
+				bool elevationSource = !planetUV || usesHeightGrid();
+
+				if (mType != mapType.Visual && (mType != mapType.Biome || biomeUnderlay) && elevationSource)
 				{
 					int lookAhead = mapstep + 1;
 					bool lookAheadHidden = lookAhead < startLine || lookAhead > stopLine;   // RPM reserved rows: the shader draws them clear

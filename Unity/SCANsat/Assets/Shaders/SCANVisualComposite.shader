@@ -140,6 +140,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 			float _Grid;        // 1: the small map's dotted 30-degree graticule
 			float _HasSource;   // Visual: 0 when there is no colour texture for the body -> whole map _UnscannedColor (the old CPU fallback)
 			float _BaseNone;    // 1: no base layer at all, every pixel starts as _UnscannedColor (the resource-only planet overlay)
+			float _PlanetUV;    // 1: columns in the planet's ScaledSpace UV layout (u = 0 at 90 E, longitude decreasing) - the planet overlays
 			float _OutputAlpha; // final multiplier on the whole colour (the terrain planet overlay is 90 percent)
 			float _ResGreyBlend;   // resource overlay: blend toward grey for below-range cells (resourceToColor32's Transparency argument)
 			float _NoData;      // 1: no terrain (Altimetry/Slope on a body without PQS) or no biome map (Biome): black-white static like the CPU renderers
@@ -321,8 +322,10 @@ Shader "Hidden/SCANsat/VisualComposite"
 				if (pix.y < _RowMin || pix.y > _RowMax)
 					return _ClearColor;
 
-				// Pixel -> raw coord (SCANmap.cs:1023-1024), then unproject.
-				float lonRaw = (i.uv.x * _MapWidth / _MapScale) - 180.0 + _LonOffset;
+				// Pixel -> raw coord, then unproject. A planet overlay texture is laid out the way the body's
+				// ScaledSpace UVs read it: u = 0 at 90 degrees east and longitude decreasing with u - the
+				// inverse of Visual's fLon below, and what the old CPU overlays' fixLon did per column.
+				float lonRaw = _PlanetUV > 0.5 ? 90.0 - (i.uv.x * _MapWidth / _MapScale) : (i.uv.x * _MapWidth / _MapScale) - 180.0 + _LonOffset;
 				float latRaw = (vy * _MapHeight / _MapScale) - 90.0 + _LatOffset;
 
 				float lon, lat;
@@ -376,14 +379,30 @@ Shader "Hidden/SCANsat/VisualComposite"
 					}
 					else if (covHas(cov, 0.0) || covHas(cov, 1.0))
 					{
-						// True gradient from neighbour elevation texels (cleaner than the CPU
-						// cross-scanline max-diff; won't match it pixel-for-pixel by design).
+						// Gradient from the neighbour elevation texels, in the CPU renderer's unit: metres of
+						// rise per degree of arc, over 1000, clamped to 0..2 (the body's radius never enters;
+						// a texel is 1/_MapScale degrees whatever the map's size or zoom). The CPU compared a
+						// pixel with the highest of three in the row above; this takes the largest one-sided
+						// difference in the four directions, so it won't match pixel-for-pixel by design.
+						// A neighbour texel at exactly 0 was never sampled (uncovered cells stay 0 on the PQS
+						// path; a true 0 m is stored as -0.001) and is skipped, or every coverage edge would
+						// read as a cliff down to 0 m. Where a texel column is a line of longitude (any
+						// geographic cache, or a rectangular window map) its run shrinks by cos(lat), as
+						// SCANUtil.slope's latOffset does.
 						float2 tx = float2(1.0 / _MapWidth, 1.0 / _MapHeight);
 						float e  = tex2D(_ElevationTex, elevUV).r;
 						float eR = tex2D(_ElevationTex, elevUV + float2(tx.x, 0)).r;
+						float eL = tex2D(_ElevationTex, elevUV - float2(tx.x, 0)).r;
 						float eU = tex2D(_ElevationTex, elevUV + float2(0, tx.y)).r;
-						float v = saturate(max(abs(e - eR), abs(e - eU)) / (1000.0 / _MapScale) * 0.5);
-						v = min(v, 2.0);
+						float eD = tex2D(_ElevationTex, elevUV - float2(0, tx.y)).r;
+						float dR = abs(eR) > 0.0 ? abs(e - eR) : 0.0;
+						float dL = abs(eL) > 0.0 ? abs(e - eL) : 0.0;
+						float dU = abs(eU) > 0.0 ? abs(e - eU) : 0.0;
+						float dD = abs(eD) > 0.0 ? abs(e - eD) : 0.0;
+						float lonRun = (_ElevPixelSpace < 0.5 || _Projection < 0.5) ? max(cos(lat * DEG2RAD), 0.05) : 1.0;
+						float dx = max(dR, dL) / lonRun;
+						float dy = max(dU, dD);
+						float v = min(max(dx, dy) / (1000.0 / _MapScale), 2.0);
 						if (v < _SlopeCutoff)
 							col = lerp(_SlopeLoColorOne, _SlopeHiColorOne, v / _SlopeCutoff);
 						else
