@@ -159,8 +159,11 @@ Shader "Hidden/SCANsat/VisualComposite"
 				lat = fmod(lat + 1800.0 + 90.0, 180.0) - 90.0;
 			}
 
-			// Pixel raw coords -> geographic lon/lat (degrees). Returns false for out-of-disc pixels.
-			bool unproject(float lonRaw, float latRaw, out float lon, out float lat)
+			// Pixel raw coords -> geographic lon/lat (degrees). Returns 0.0 for out-of-disc pixels, else 1.0.
+			// A float, not a bool: FXC folds a bool return across the projection branches into a movc that
+			// merges a bool with a float, and HLSLcc's Vulkan cross-compile fails on that ("ERROR missing
+			// components in GetBitcastOp()"); which way FXC folds it depends on unrelated code below.
+			float unproject(float lonRaw, float latRaw, out float lon, out float lat)
 			{
 				lon = 0.0;   // assigned again below; keeps FXC from flagging the outs as maybe-uninitialised
 				lat = 0.0;
@@ -204,7 +207,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 					float centerLat = DEG2RAD * _CenteredLat;
 					float p2 = sqrt(lonr * lonr + latr * latr);
 					float c2 = asin(p2 / 1.5);
-					if (cos(c2) < 0.0) return false;   // back hemisphere
+					if (cos(c2) < 0.0) return 0.0;   // back hemisphere
 					float gl = centerLon + atan2(lonr * sin(c2), p2 * cos(c2) * cos(centerLat) - latr * sin(c2) * sin(centerLat));
 					gl = fmod(RAD2DEG * gl + 180.0, 360.0) - 180.0;
 					if (gl <= -180.0) gl += 360.0;
@@ -214,7 +217,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 
 				// Written so a NaN fails too: FXC compiles under fast-math and may drop isnan(), and every
 				// comparison with NaN is false, so "NaN or out of range -> false" has to be one positive test.
-				return lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0;
+				return (lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0) ? 1.0 : 0.0;
 			}
 
 			// SCANcolorUtil.ConvertToGrayscale weights.
@@ -329,7 +332,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 				float latRaw = (vy * _MapHeight / _MapScale) - 90.0 + _LatOffset;
 
 				float lon, lat;
-				if (!unproject(lonRaw, latRaw, lon, lat))
+				if (unproject(lonRaw, latRaw, lon, lat) < 0.5)
 					return _ClearColor;
 
 				// Coverage stencil lookup (SCANUtil.icLON/icLAT -> Coverage[ilon,ilat]).
