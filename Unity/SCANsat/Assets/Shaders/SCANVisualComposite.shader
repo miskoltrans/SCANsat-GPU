@@ -57,6 +57,9 @@ Shader "Hidden/SCANsat/VisualComposite"
 			CGPROGRAM
 			#pragma vertex vert_img
 			#pragma fragment frag
+			// tex2Dgrad / tex2Dlod below: shader model 3.0. Without this Unity assumes 2.5
+			// (D3D11 ps_4_0_level_9_3), which has neither.
+			#pragma target 3.0
 			#include "UnityCG.cginc"
 
 			sampler2D _ScaledColor;
@@ -121,7 +124,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 
 			float4 _UnscannedColor;
 			float4 _ClearColor;
-			float4 _GreyColor;      // palette.Grey (for below-min-range resource)
+			float4 _GreyColor;      // palette.Grey (for below-range or empty resource)
 
 			// Cosmetic sweep reveal (matches the CPU modes' line-by-line render look).
 			float _SweepY;                 // revealed fraction in texture-row space (uv.y). >=1 = done, no redline.
@@ -376,6 +379,19 @@ Shader "Hidden/SCANsat/VisualComposite"
 				if (fLon > 1.0) fLon -= 1.0;
 				fLon = saturate(1.0 - fLon);
 
+				// Explicit gradients for the two Visual samples. fLon wraps at 90 E, so on the pixel quad
+				// straddling the wrap ddx(fLon) is about +-1 and the hardware picks the coarsest mip for
+				// that quad - a 1-2 px blurred vertical seam at 90 E on any mipmapped source (a body with
+				// no SCANSAT_BODY_TEXTURES node, drawn from its ScaledSpace textures; the cfg path loads a
+				// single mip level, so nothing on RSS shows it). Fold the +-1 step back out of the
+				// derivative, and take it HERE - once, before the coverage branches - so the samples do not
+				// rely on helper-lane derivatives inside divergent flow.
+				float2 visUV = float2(fLon, fLat);
+				float2 visDX = ddx(visUV);
+				float2 visDY = ddy(visUV);
+				visDX.x -= floor(visDX.x + 0.5);   // floor(x+0.5), not round(): plainest thing FXC/HLSLcc can fold
+				visDY.x -= floor(visDY.x + 0.5);
+
 				float4 col = _UnscannedColor;
 
 				if (_BaseNone > 0.5)            // ---- no base layer: the resource-only planet overlay ----
@@ -502,11 +518,11 @@ Shader "Hidden/SCANsat/VisualComposite"
 					bool visLo = covHas(cov, 2.0);
 					if (visHi)
 					{
-						col = tex2D(_ScaledColor, float2(fLon, fLat));
+						col = tex2Dgrad(_ScaledColor, visUV, visDX, visDY);
 						if (_ColorMode > 0.5)
 						{
 							if (_HasNormal > 0.5)
-								col.rgb = normalSoftLight(col.rgb, normalY(tex2D(_ScaledNormal, float2(fLon, fLat))));
+								col.rgb = normalSoftLight(col.rgb, normalY(tex2Dgrad(_ScaledNormal, visUV, visDX, visDY)));
 						}
 						else
 						{
@@ -517,7 +533,9 @@ Shader "Hidden/SCANsat/VisualComposite"
 					else if (visLo)
 					{
 						float2 q = float2(floor(fLon * 512.0) / 512.0, floor(fLat * 256.0) / 256.0);
-						col = tex2D(_ScaledColor, q);
+						// The floor() step makes the derivative spike at every block edge, which would pick a
+						// coarse mip there. Level 0 is what the CPU did (GetPixelBilinear on the base level).
+						col = tex2Dlod(_ScaledColor, float4(q, 0.0, 0.0));
 						if (_ColorMode <= 0.5)
 							col.rgb = grayscale(col.rgb);
 						col.a = 1.0;
