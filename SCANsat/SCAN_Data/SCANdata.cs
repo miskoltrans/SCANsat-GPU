@@ -38,6 +38,10 @@ namespace SCANsat.SCAN_Data
 
 		private float[,] tempHeightMap;
 
+		/* MAP: height map build stats, for the completion log */
+		private float buildStart = -1f;
+		private int buildFrames, buildLastFrame;
+
 		/* MAP: options */
 		private bool disabled;
 
@@ -844,7 +848,24 @@ namespace SCANsat.SCAN_Data
 				tempHeightMap = new float[360, 180];
 			}
 
-			if (step >= 179)
+			// Stats for the completion log: wall time from the first row, and how many frames it was
+			// spread over - SCANcontroller.pumpHeightMap runs several rows per frame under the budget.
+			if (buildStart < 0f)
+			{
+				buildStart = Time.realtimeSinceStartup;
+				buildFrames = 0;
+				buildLastFrame = -1;
+			}
+
+			if (buildLastFrame != Time.frameCount)
+			{
+				buildLastFrame = Time.frameCount;
+				buildFrames++;
+			}
+
+			// Rows 0..179 are latitudes -90..89, so the map is full only at step 180: stopping at 179 left
+			// the north polar row unsampled and reading 0 m for every longitude.
+			if (step >= 180)
 			{
 				SCANcontroller.controller.unloadPQS(body);
 				step = 0;
@@ -858,33 +879,9 @@ namespace SCANsat.SCAN_Data
 					heightMaps.Add(body.flightGlobalsIndex, tempHeightMap);
 				}
 
-				// The sampled map is the only reliable source for the body's real height range; fit the
-				// auto-generated palette range to it (no-op for user-set or cfg-provided ranges).
-				float hMin = float.MaxValue;
-				float hMax = float.MinValue;
-
-				for (int x = 0; x < 360; x++)
-				{
-					for (int y = 0; y < 180; y++)
-					{
-						float v = tempHeightMap[x, y];
-
-						if (v < hMin)
-						{
-							hMin = v;
-						}
-
-						if (v > hMax)
-						{
-							hMax = v;
-						}
-					}
-				}
-
-				SCANcontroller.refineTerrainRange(body, hMin, hMax);
-
 				tempHeightMap = null;
-				SCANUtil.SCANlog("Height Map Of [{0}] Completed...", body.bodyName);
+				SCANUtil.SCANlog("Height Map Of [{0}] Completed: 360x180 samples, build {1} frames / {2:F0} ms", body.bodyName, buildFrames, (Time.realtimeSinceStartup - buildStart) * 1000f);
+				buildStart = -1f;
 				return;
 			}
 

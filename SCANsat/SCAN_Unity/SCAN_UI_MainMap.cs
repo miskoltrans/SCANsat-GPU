@@ -874,7 +874,7 @@ namespace SCANsat.SCAN_Unity
 				}
 
 				data.MapBuilding = true;
-				data.generateHeightMap(ref scanline, ref scanstep, 360);
+				SCANcontroller.pumpHeightMap(data, ref scanline, ref scanstep);
 				return;
 			}
 

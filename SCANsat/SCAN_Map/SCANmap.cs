@@ -1972,6 +1972,25 @@ namespace SCANsat.SCAN_Map
 		private static int budgetFrame = -1;
 		private static long budgetUsedTicks;
 
+		// The same budget for builders outside this class (SCANcontroller.pumpHeightMap): claim what is
+		// left of this frame's allowance, run at least one step however long that takes, then report
+		// what was spent so the next builder this frame sees it.
+		internal static long claimBuildBudget()
+		{
+			if (budgetFrame != Time.frameCount)
+			{
+				budgetFrame = Time.frameCount;
+				budgetUsedTicks = 0;
+			}
+
+			return (long)(gpuBuildBudgetMs() * System.Diagnostics.Stopwatch.Frequency / 1000.0) - budgetUsedTicks;
+		}
+
+		internal static void reportBuildBudgetUsed(long ticks)
+		{
+			budgetUsedTicks += ticks;
+		}
+
 		// The CPU sampling for row mapstep: the elevation look-ahead into big_heightmap (row mapstep+1)
 		// and, in Biome mode, biomeIndex for the current row. buildGpuDataFrame stages the results into
 		// the data textures; the shader does all the colourising.
@@ -2081,12 +2100,7 @@ namespace SCANsat.SCAN_Map
 		private void buildGpuDataFrame()
 		{
 			long start = System.Diagnostics.Stopwatch.GetTimestamp();
-			if (budgetFrame != Time.frameCount)
-			{
-				budgetFrame = Time.frameCount;
-				budgetUsedTicks = 0;
-			}
-			long budget = (long)(gpuBuildBudgetMs() * System.Diagnostics.Stopwatch.Frequency / 1000.0) - budgetUsedTicks;
+			long budget = claimBuildBudget();
 			bool elevDirty = false, biomeDirty = false, builtNow = false;
 
 			if (mapstep < -1)
@@ -2127,7 +2141,7 @@ namespace SCANsat.SCAN_Map
 
 				if (rangeRow < mapheight)
 				{
-					budgetUsedTicks += System.Diagnostics.Stopwatch.GetTimestamp() - start;
+					reportBuildBudgetUsed(System.Diagnostics.Stopwatch.GetTimestamp() - start);
 					return;   // nothing to show yet; the RenderTexture keeps the previous pass
 				}
 			}
@@ -2173,7 +2187,7 @@ namespace SCANsat.SCAN_Map
 			if (elevDirty) elevationTex.Apply(false);
 			if (biomeDirty) biomeIndexTex.Apply(false);
 
-			budgetUsedTicks += System.Diagnostics.Stopwatch.GetTimestamp() - start;
+			reportBuildBudgetUsed(System.Diagnostics.Stopwatch.GetTimestamp() - start);
 
 			if (builtNow)
 			{

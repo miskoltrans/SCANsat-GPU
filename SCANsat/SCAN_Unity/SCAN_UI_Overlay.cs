@@ -853,7 +853,7 @@ namespace SCANsat.SCAN_Unity
 						}
 
 						data.OverlayBuilding = true;
-						data.generateHeightMap(ref mapStep, ref mapStart, 360);
+						SCANcontroller.pumpHeightMap(data, ref mapStep, ref mapStart);
 					}
 
 					timer++;

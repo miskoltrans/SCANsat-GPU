@@ -380,7 +380,6 @@ namespace SCANsat.SCAN_Unity
 			}
 
 			bigmap.setBody(body);
-			SCANcontroller.controller.RequestHeightMap(data);   // refines the body's terrain range in the background while it is on screen
 
 			currentResource = AssignResource(SCANcontroller.controller.bigMapResource);
 
@@ -1383,7 +1382,6 @@ namespace SCANsat.SCAN_Unity
 					data = bodyData;
 					body = data.Body;
 					bigmap.setBody(body);
-					SCANcontroller.controller.RequestHeightMap(data);
 
 					if (OrbitToggle && ShowOrbit)
 					{
