@@ -406,7 +406,14 @@ Shader "Hidden/SCANsat/VisualComposite"
 						float dx = max(dR, dL) / lonRun;
 						float dy = max(dU, dD);
 						float v = min(max(dx, dy) / (1000.0 / _MapScale), 2.0);
-						if (v < _SlopeCutoff)
+						if (_ColorMode <= 0.5)
+						{
+							// Greyscale (SCANmap.getPartialMap: palette.lerp(Black, White, v / 2)). The
+							// cutoff and the four slope colours are not consulted.
+							float g = v * 0.5;
+							col = float4(g, g, g, 1.0);
+						}
+						else if (v < _SlopeCutoff)
 							col = lerp(_SlopeLoColorOne, _SlopeHiColorOne, v / _SlopeCutoff);
 						else
 							col = lerp(_SlopeLoColorTwo, _SlopeHiColorTwo, (v - _SlopeCutoff) / (2.0 - _SlopeCutoff));
@@ -428,7 +435,18 @@ Shader "Hidden/SCANsat/VisualComposite"
 						// Border: differs from the pixel to the left or the row below (the CPU's mapline compare).
 						float bL = tex2D(_BiomeIndexTex, pixUV - float2(tx.x, 0)).r;
 						float bD = tex2D(_BiomeIndexTex, pixUV - float2(0, tx.y)).r;
-						if (_BiomeBorder > 0.5 && (abs(bIdx - bL) > 0.0001 || abs(bIdx - bD) > 0.0001))
+						// A float flag, not a bool: keep boolean results out of anything FXC can fold into a
+						// movc (see unproject).
+						float edge = (abs(bIdx - bL) > 0.0001 || abs(bIdx - bD) > 0.0001) ? 1.0 : 0.0;
+						if (_ColorMode <= 0.5)
+						{
+							// Greyscale (SCANmap.getPartialMap: palette.lerp(Black, White, biome index)),
+							// with no elevation underlay. The CPU renderer drew the white edge in greyscale
+							// whatever the border toggle said; here the toggle is honoured.
+							float g = (edge > 0.5 && _BiomeBorder > 0.5) ? 1.0 : bIdx;
+							col = float4(g, g, g, 1.0);
+						}
+						else if (_BiomeBorder > 0.5 && edge > 0.5)
 						{
 							col = float4(1.0, 1.0, 1.0, 1.0);   // palette.White border
 						}
