@@ -42,7 +42,6 @@ namespace SCANsat.SCAN_Unity
 
 		private bool mapGenerating;
 		private double degreeOffset;
-		private int mapStep, mapStart;
 		private bool bodyBiome, bodyPQS;
 
 		private int timer;
@@ -844,16 +843,15 @@ namespace SCANsat.SCAN_Unity
 
 				while (!data.Built && timer < 2000 && build == overlayBuild)
 				{
-					if (!data.ControllerBuilding && !data.MapBuilding)
-					{
-						if (!data.OverlayBuilding)
-						{
-							mapStep = 0;
-							mapStart = 0;
-						}
+					// Someone else owns the build - unless nobody has pumped it for a few frames, in which
+					// case that owner is gone and the build is ours to finish, from the row it stopped on.
+					bool ownedElsewhere = (data.ControllerBuilding || data.MapBuilding) && !data.BuildStalled;
 
+					if (!ownedElsewhere)
+					{
+						data.takeOverBuild();
 						data.OverlayBuilding = true;
-						SCANcontroller.pumpHeightMap(data, ref mapStep, ref mapStart);
+						SCANcontroller.pumpHeightMap(data);
 					}
 
 					timer++;

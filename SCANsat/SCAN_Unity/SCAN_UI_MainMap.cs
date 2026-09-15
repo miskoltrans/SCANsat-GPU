@@ -35,8 +35,6 @@ namespace SCANsat.SCAN_Unity
 		private SCANtype sensors;
 		private SCANmap visualMap;      // the small map: one 360x180 rectangular SCANmap, GPU-composited in every display mode (see pumpMap)
 		private Texture shownTexture;   // what the RawImage currently points at
-		private int scanline;           // cursor of the body's 360x180 height map build when this window pumps it
-		private int scanstep;
 		private int updateInterval = 60;
 		private int lastUpdate;
 		private bool flip;
@@ -862,19 +860,17 @@ namespace SCANsat.SCAN_Unity
 			// the build from here as the classic small map did, and draw nothing meanwhile.
 			if (display == MainMapDisplayMode.Terrain && !data.Built)
 			{
-				if (data.ControllerBuilding || data.OverlayBuilding)
+				// Someone else owns the build - unless nobody has pumped it for a few frames, in which case
+				// that owner is gone (a window closed, an overlay build abandoned, a body swapped under it)
+				// and the build is ours to finish, from the row it stopped on.
+				if ((data.ControllerBuilding || data.OverlayBuilding) && !data.BuildStalled)
 				{
 					return;
 				}
 
-				if (!data.MapBuilding)
-				{
-					scanline = 0;
-					scanstep = 0;
-				}
-
+				data.takeOverBuild();
 				data.MapBuilding = true;
-				SCANcontroller.pumpHeightMap(data, ref scanline, ref scanstep);
+				SCANcontroller.pumpHeightMap(data);
 				return;
 			}
 

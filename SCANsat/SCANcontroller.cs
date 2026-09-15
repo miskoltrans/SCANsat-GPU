@@ -1381,7 +1381,6 @@ namespace SCANsat
 			}
 		}
 
-		private int dataStep, dataStart;
 		private bool currentlyBuilding;
 		private SCANdata buildingData;
 		private readonly List<SCANdata> heightMapRequests = new List<SCANdata>();
@@ -1396,7 +1395,9 @@ namespace SCANsat
 		/// </summary>
 		internal void RequestHeightMap(SCANdata d)
 		{
-			if (d == null || d.Built || d == buildingData || heightMapRequests.Contains(d))
+			// "d == buildingData" only bars a build this controller is actually running: the reference is
+			// dropped the moment the build is handed over, or every later request would be swallowed.
+			if (d == null || d.Built || (currentlyBuilding && d == buildingData) || heightMapRequests.Contains(d))
 			{
 				return;
 			}
@@ -1410,16 +1411,18 @@ namespace SCANsat
 		/// one-row-per-call cadence made this frame-rate bound rather than CPU bound - the 64,800 PQS
 		/// samples are only about 80 ms of work, but they took 4.5 s on the Moon (RSS) and around ten
 		/// in a heavier scene, ~98% of it spent waiting for the next frame. Whoever owns the build (here,
-		/// the small map or the overlay) pumps it through this, so all three run at the same pace.
+		/// the small map or the overlay) pumps it through this, so all three run at the same pace. The
+		/// row cursor is the SCANdata's own, so a build taken over by another builder carries on from
+		/// where it stopped.
 		/// </summary>
-		internal static void pumpHeightMap(SCANdata d, ref int step, ref int xStart)
+		internal static void pumpHeightMap(SCANdata d)
 		{
 			long start = System.Diagnostics.Stopwatch.GetTimestamp();
 			long budget = SCANmap.claimBuildBudget();
 
 			while (true)
 			{
-				d.generateHeightMap(ref step, ref xStart, 360);
+				d.generateHeightMap(360);
 
 				// Every call either finishes the map or advances a row, so this always terminates.
 				if (d.Built || System.Diagnostics.Stopwatch.GetTimestamp() - start >= budget)
@@ -1445,15 +1448,21 @@ namespace SCANsat
 					buildingData = heightMapRequests[0];
 					heightMapRequests.RemoveAt(0);
 
-					if (buildingData == null || buildingData.Built || buildingData.MapBuilding || buildingData.OverlayBuilding)
+					if (buildingData == null || buildingData.Built)
 					{
-						continue;   // built meanwhile, or another window is pumping it
+						continue;   // built meanwhile
 					}
 
+					// A window is pumping it - unless its claim has lapsed, in which case that window is
+					// gone and the build is ours to finish, from the row it stopped on.
+					if ((buildingData.MapBuilding || buildingData.OverlayBuilding) && !buildingData.BuildStalled)
+					{
+						continue;
+					}
+
+					buildingData.takeOverBuild();
 					buildingData.ControllerBuilding = true;
 					currentlyBuilding = true;
-					dataStep = 0;
-					dataStart = 0;
 					return;
 				}
 
@@ -1477,11 +1486,15 @@ namespace SCANsat
 
 			if (buildingData.ControllerBuilding)
 			{
-				pumpHeightMap(buildingData, ref dataStep, ref dataStart);
+				pumpHeightMap(buildingData);
 				return;
 			}
 
-			currentlyBuilding = false;   // another window took the build over
+			// Another window took the build over. Drop the reference as well: heightMapWorkPending goes
+			// false here, so nothing would ever clear it again, and RequestHeightMap for this body would
+			// be a no-op for the rest of the scene.
+			buildingData = null;
+			currentlyBuilding = false;
 		}
 
 		private void OnDestroy()
@@ -1535,13 +1548,16 @@ namespace SCANsat
 				SCAN_Settings_Config.Instance.Save();
 			}
 
-			if (currentlyBuilding)
+			// SCANdata.generateHeightMap loads and unloads PQS with mapSource.Data whichever builder drives
+			// it, so a build the small map or the terrain overlay owned leaves data loaded with this
+			// controller's own build flag clear. dataBodies is what is actually loaded; unload all of it.
+			// A terrain survey holds its body across scenes on purpose and unloads it itself when the body
+			// is done, so leave the list alone while one is running.
+			if (!SCANterrainSurvey.Running)
 			{
 				for (int i = dataBodies.Count - 1; i >= 0; i--)
 				{
-					CelestialBody b = dataBodies[i];
-
-					unloadPQS(b);
+					unloadPQS(dataBodies[i]);
 				}
 			}
 

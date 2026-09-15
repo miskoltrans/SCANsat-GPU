@@ -42,6 +42,11 @@ namespace SCANsat.SCAN_Data
 		private float buildStart = -1f;
 		private int buildFrames, buildLastFrame;
 
+		/* MAP: the build cursor. It lives with the map, not with whoever pumps it, so a build handed
+		   from one builder to another - a window closed, a SOI change, an abandoned overlay build -
+		   resumes where it stopped instead of sampling the body again (seconds on RSS). */
+		private int buildStep, buildXStart;
+
 		/* MAP: options */
 		private bool disabled;
 
@@ -130,6 +135,26 @@ namespace SCANsat.SCAN_Data
 		{
 			get { return controllerBuilding; }
 			internal set { controllerBuilding = value; }
+		}
+
+		/// <summary>
+		/// The build is claimed but nobody has pumped it for a few frames. No builder gets a callback
+		/// when it stops pumping - the small map's window closed, or its display mode left Terrain, or a
+		/// vessel or SOI change swapped the body under it; a newer overlay build abandoned this one - so
+		/// a claim is dropped by lapsing rather than by clearing. Whoever wants the map next takes the
+		/// build over and resumes from buildStep.
+		/// </summary>
+		public bool BuildStalled
+		{
+			get { return !built && buildLastFrame >= 0 && Time.frameCount - buildLastFrame > 5; }
+		}
+
+		/// <summary>Drop a lapsed claim so the caller can set its own.</summary>
+		internal void takeOverBuild()
+		{
+			mapBuilding = false;
+			overlayBuilding = false;
+			controllerBuilding = false;
 		}
 
 		public bool Built
@@ -803,7 +828,7 @@ namespace SCANsat.SCAN_Data
 
 		#region Height Map
 
-		internal void generateHeightMap(ref int step, ref int xStart, int width)
+		internal void generateHeightMap(int width)
 		{
 			if (body.pqsController == null)
 			{
@@ -819,7 +844,7 @@ namespace SCANsat.SCAN_Data
 				return;
 			}
 
-			if (step <= 0 && xStart <= 0)
+			if (buildStep <= 0 && buildXStart <= 0)
 			{
 				SCANcontroller.controller.loadPQS(body);
 
@@ -865,11 +890,11 @@ namespace SCANsat.SCAN_Data
 
 			// Rows 0..179 are latitudes -90..89, so the map is full only at step 180: stopping at 179 left
 			// the north polar row unsampled and reading 0 m for every longitude.
-			if (step >= 180)
+			if (buildStep >= 180)
 			{
 				SCANcontroller.controller.unloadPQS(body);
-				step = 0;
-				xStart = 0;
+				buildStep = 0;
+				buildXStart = 0;
 				built = true;
 				mapBuilding = false;
 				overlayBuilding = false;
@@ -885,19 +910,19 @@ namespace SCANsat.SCAN_Data
 				return;
 			}
 
-			for (int i = xStart; i < xStart + width; i++)
+			for (int i = buildXStart; i < buildXStart + width; i++)
 			{
-				tempHeightMap[i, step] = (float)SCANUtil.getElevation(body, i - 180, step - 90);
+				tempHeightMap[i, buildStep] = (float)SCANUtil.getElevation(body, i - 180, buildStep - 90);
 			}
 
-			if (xStart + width >= 359)
+			if (buildXStart + width >= 359)
 			{
-				step++;
-				xStart = 0;
+				buildStep++;
+				buildXStart = 0;
 				return;
 			}
 
-			xStart += width;
+			buildXStart += width;
 		}
 
 
