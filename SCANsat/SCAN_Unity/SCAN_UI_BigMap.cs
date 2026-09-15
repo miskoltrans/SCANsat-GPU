@@ -579,8 +579,9 @@ namespace SCANsat.SCAN_Unity
 			}
 
 			// The grid texture is rendered for the map's on-screen size; re-render when that changes
-			// (first layout after open, window resize, UI scale). Checked every 16 frames.
-			if (GridToggle && (Time.frameCount & 15) == 0)
+			// (window resize, UI scale), checked every 16 frames - and every frame until the first
+			// layout pass has given the map image a size, so the grid appears crisp on that frame.
+			if (GridToggle && (gridPixelSize == Vector2.zero || (Time.frameCount & 15) == 0))
 			{
 				Vector2 px = uiElement.MapPixelSize();
 
@@ -1224,10 +1225,19 @@ namespace SCANsat.SCAN_Unity
 			// Same dotted graticule on the same UI layer as before (was the CPU GenerateGridMap), but
 			// rendered at the map's on-screen pixel size, so a dot is one screen pixel whatever the window
 			// size and UI scale instead of a map texel resampled by the UI. Before the first layout pass
-			// the rect is empty: fall back to the map size, and Update re-renders once the real size is
-			// known or when it changes.
+			// the rect is empty: show nothing until Update sees the real size (it checks every frame
+			// until then). A grid rendered at the map's own size and stretched by the UI in the
+			// meantime showed as bright blotches at the map's corners for the first frames of every open.
 			Vector2 px = uiElement.MapPixelSize();
-			int w = px.x >= 2f ? Mathf.Clamp(Mathf.RoundToInt(px.x), 2, 8192) : bigmap.MapWidth;
+
+			if (px.x < 2f)
+			{
+				gridPixelSize = Vector2.zero;
+				uiElement.UpdateGridTexture(clearMap);
+				return;
+			}
+
+			int w = Mathf.Clamp(Mathf.RoundToInt(px.x), 2, 8192);
 			int h = Mathf.Max(1, Mathf.RoundToInt(w * (float)bigmap.MapHeight / bigmap.MapWidth));
 			gridPixelSize = px;
 			gridMap = bigmap.renderGrid(gridMap, w, h);
