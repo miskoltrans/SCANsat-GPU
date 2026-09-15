@@ -1298,6 +1298,14 @@ namespace SCANsat
 			{
 				checkHeightMapStatus();
 			}
+
+			// Authoring tool: does nothing unless a SCANSAT_TERRAIN_SURVEY node asks for a run.
+			SCANterrainSurvey.CheckForRequest();
+
+			if (SCANterrainSurvey.Running)
+			{
+				SCANterrainSurvey.Pump();
+			}
 		}
 
 		private IEnumerator WaitForScienceUpdate()

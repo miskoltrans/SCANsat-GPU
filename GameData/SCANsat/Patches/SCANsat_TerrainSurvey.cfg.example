@@ -1,0 +1,30 @@
+// Authoring tool, not shipped active - note the .example extension, KSP only indexes .cfg.
+//
+// Rename to SCANsat_TerrainSurvey.cfg, start a game, and SCANsat measures each body's real height
+// range from PQS and writes GameData/SCANsat/PluginData/SCANsat_TerrainSurvey.cfg with the
+// SCANSAT_TERRAIN nodes. Per-body results also go to the log as they finish. Delete (or re-disable)
+// this file afterwards - it re-runs every session while it exists.
+//
+// Why it exists: without an authored node a body's palette range is pqsController.radiusMin/Max, and
+// for a Kopernicus body built from a template those are the template's numbers, shared with every
+// sibling. On RSS, Mimas / Enceladus / Tethys / Dione / Rhea / Iapetus / Triton all report
+// -1200..9900 m and Ariel / Umbriel / Titania / Oberon all report -450..10260.
+//
+// The game is deliberately slow while this runs - it takes msPerFrame out of every frame. The whole
+// RSS system at these settings is a few minutes in the space centre.
+
+SCANSAT_TERRAIN_SURVEY
+{
+	// Sampling resolution. 10 is 0.1 degrees: 3600x1800 per body, ~11 km at the equator on Earth,
+	// which is fine enough to land on a summit that a 1 degree grid steps straight over. Sampling can
+	// only ever miss extremes, never invent them, so the measured range is a lower bound that tightens
+	// as this goes up - and the cost is quadratic. Capped at 100.
+	samplesPerDegree = 10
+
+	// CPU milliseconds per frame. Capped at 200.
+	msPerFrame = 30
+
+	// Optional, repeatable: survey only these bodies. Omit for every body with a PQS.
+	// body = Mimas
+	// body = Earth
+}
