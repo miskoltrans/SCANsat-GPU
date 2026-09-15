@@ -928,8 +928,7 @@ namespace SCANsat.SCAN_Unity
 
 		public void TerrainApply()
 		{
-			currentTerrain.MinTerrain = _terrainCurrentMin;
-			currentTerrain.MaxTerrain = _terrainCurrentMax;
+			currentTerrain.SetRange(_terrainCurrentMin, _terrainCurrentMax);
 			currentTerrain.ClampTerrain = _terrainClampOn ? (float?)_terrainClamp : null;
 			currentTerrain.PalDis = _terrainDiscrete;
 			currentTerrain.PalRev = _terrainReverse;
@@ -962,8 +961,7 @@ namespace SCANsat.SCAN_Unity
 
 		public void TerrainDefault()
 		{
-			currentTerrain.MinTerrain = currentTerrain.DefaultMinHeight;
-			currentTerrain.MaxTerrain = currentTerrain.DefaultMaxHeight;
+			currentTerrain.SetRange(currentTerrain.DefaultMinHeight, currentTerrain.DefaultMaxHeight);
 			currentTerrain.ClampTerrain = currentTerrain.DefaultClampHeight;
 			currentTerrain.ColorPal = currentTerrain.DefaultPalette;
 			currentTerrain.PalRev = currentTerrain.DefaultReverse;
@@ -997,8 +995,7 @@ namespace SCANsat.SCAN_Unity
 
 		public void TerrainSaveToConfig()
 		{
-			currentTerrain.MinTerrain = _terrainCurrentMin;
-			currentTerrain.MaxTerrain = _terrainCurrentMax;
+			currentTerrain.SetRange(_terrainCurrentMin, _terrainCurrentMax);
 			currentTerrain.ClampTerrain = _terrainClampOn ? (float?)_terrainClamp : null;
 			currentTerrain.PalDis = _terrainDiscrete;
 			currentTerrain.PalRev = _terrainReverse;
