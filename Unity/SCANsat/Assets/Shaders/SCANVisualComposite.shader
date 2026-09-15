@@ -36,7 +36,6 @@ Shader "Hidden/SCANsat/VisualComposite"
 		_SweepY ("Sweep Reveal", Float) = 1
 		_SweepBand ("Sweep Band (rows)", Float) = 2
 		_MapMode ("Map Mode", Float) = 3
-		_MapBackgroundColor ("Map Background", Color) = (0,0,0,1)
 		_RedlineColor ("Redline", Color) = (1,0,0,1)
 		// Defaults that keep an unset material drawing the whole map the classic way.
 		_RowMin ("Row Min", Float) = 0
@@ -81,7 +80,6 @@ Shader "Hidden/SCANsat/VisualComposite"
 			float _Projection;      // 0 Rectangular, 1 KavrayskiyVII, 2 Polar, 3 Orthographic
 			float _CenteredLon;
 			float _CenteredLat;
-			float _FlipY;           // 1 to flip the vertical axis (Blit Y-orientation safety toggle)
 
 			float _MapMode;         // 0 Altimetry, 1 Slope, 2 Biome, 3 Visual (mapType enum)
 
@@ -129,7 +127,6 @@ Shader "Hidden/SCANsat/VisualComposite"
 			// Cosmetic sweep reveal (matches the CPU modes' line-by-line render look).
 			float _SweepY;                 // revealed fraction in texture-row space (uv.y). >=1 = done, no redline.
 			float _SweepBand;              // redline thickness in rows
-			float4 _MapBackgroundColor;    // unused since the no-clear sweep; kept so the C# side can still set it
 			float4 _RedlineColor;          // the advancing scanline colour
 
 			// Data-texture addressing. The big map's elevation cache is geographic (it survives projection
@@ -343,7 +340,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 						return _RedlineColor;
 				}
 
-				float vy = _FlipY > 0.5 ? 1.0 - i.uv.y : i.uv.y;
+				float vy = i.uv.y;
 				float2 pixUV = float2(i.uv.x, vy);
 				float2 pix = floor(pixUV * float2(_MapWidth, _MapHeight));
 

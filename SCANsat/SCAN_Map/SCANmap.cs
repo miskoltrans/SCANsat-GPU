@@ -1209,7 +1209,6 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetFloat("_Projection", (float)(int)projection);
 			compositeMaterial.SetFloat("_CenteredLon", (float)centeredLong);
 			compositeMaterial.SetFloat("_CenteredLat", (float)centeredLat);
-			compositeMaterial.SetFloat("_FlipY", 0f);
 			compositeMaterial.SetFloat("_ColorMode", colorMap ? 1f : 0f);
 			compositeMaterial.SetFloat("_HasNormal", normalTex != null ? 1f : 0f);
 			compositeMaterial.SetFloat("_NormalYChannel", normalYChannel);
@@ -1274,9 +1273,6 @@ namespace SCANsat.SCAN_Map
 					reveal = Mathf.Min(reveal, Mathf.Clamp01(mapstep / (float)mapheight));
 			}
 
-			Color background = SCAN_Settings_Config.Instance.MapBackgroundColor;
-			background.a *= SCAN_Settings_Config.Instance.BackgroundTransparency;
-			compositeMaterial.SetColor("_MapBackgroundColor", background);
 			compositeMaterial.SetColor("_RedlineColor", palette.Red);
 			compositeMaterial.SetFloat("_SweepY", reveal);
 

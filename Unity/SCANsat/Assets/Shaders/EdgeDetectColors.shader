@@ -1,7 +1,7 @@
 // Upgrade NOTE: replaced 'mul(UNITY_MATRIX_MVP,*)' with 'UnityObjectToClipPos(*)'
 // Restored from git 8cf593a8 (SCANsat Shaders source dump). This is the shader
 // SCAN_UI_Loader.loadShaders() looks up by name ("Hidden/EdgeDetectColors") and
-// SCANEdgeDetect drives (_RampTex / _Sensitivity / _SampleDistance). Its source was
+// SCANEdgeDetect drives (_RampTex). Its source was
 // missing from the Unity project, so rebuilding scan_shaders.scan dropped it; restored
 // here so the rebuilt bundle keeps the anomaly-camera edge-detect effect.
 
