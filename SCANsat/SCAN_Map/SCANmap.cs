@@ -1222,7 +1222,15 @@ namespace SCANsat.SCAN_Map
 		// the projections the big map offers.
 		internal Texture2D renderGrid(Texture2D reuse)
 		{
-			if (mapwidth <= 0 || mapheight <= 0)
+			return renderGrid(reuse, mapwidth, mapheight);
+		}
+
+		// w x h is the texture size: the map's own size gives the classic texture; the map's on-screen
+		// pixel size gives one texel per screen pixel, so the dots are not resampled by the UI's
+		// scaling and come out uniform (the caller re-renders when the on-screen size changes).
+		internal Texture2D renderGrid(Texture2D reuse, int w, int h)
+		{
+			if (w <= 0 || h <= 0)
 			{
 				return null;
 			}
@@ -1234,13 +1242,16 @@ namespace SCANsat.SCAN_Map
 				return null;
 			}
 
-			RenderTexture rt = RenderTexture.GetTemporary(mapwidth, mapheight, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
+			double sx = w / 360.0;   // the big map covers the globe with no offset: pixels per projected degree
+			double sy = h / 180.0;
+
+			RenderTexture rt = RenderTexture.GetTemporary(w, h, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
 			RenderTexture prev = RenderTexture.active;
 			RenderTexture.active = rt;
 
 			GL.Clear(false, true, palette.clear);
 			GL.PushMatrix();
-			GL.LoadPixelMatrix(0, mapwidth, 0, mapheight);   // pixel (x, y), row 0 at the bottom like Texture2D.SetPixels
+			GL.LoadPixelMatrix(0, w, 0, h);   // pixel (x, y), row 0 at the bottom like Texture2D.SetPixels
 			mat.SetPass(0);
 			GL.Begin(GL.QUADS);
 
@@ -1253,8 +1264,8 @@ namespace SCANsat.SCAN_Map
 						continue;
 					}
 
-					double px = mapscale * ((projectLongitude(lon, lat) + 180) % 360);
-					double py = mapscale * ((projectLatitude(lon, lat) + 90) % 180);
+					double px = sx * ((projectLongitude(lon, lat) + 180) % 360);
+					double py = sy * ((projectLatitude(lon, lat) + 90) % 180);
 
 					if (double.IsNaN(px) || double.IsNaN(py))
 					{
@@ -1264,16 +1275,16 @@ namespace SCANsat.SCAN_Map
 					int x = (int)px;
 					int y = (int)py;
 
-					if (x < 0 || x >= mapwidth || y < 0 || y >= mapheight)
+					if (x < 0 || x >= w || y < 0 || y >= h)
 					{
 						continue;
 					}
 
 					gridPixel(x, y, palette.white);
 
-					if (x < mapwidth - 1) gridPixel(x + 1, y, palette.black);
+					if (x < w - 1) gridPixel(x + 1, y, palette.black);
 					if (x > 0) gridPixel(x - 1, y, palette.black);
-					if (y < mapheight - 1) gridPixel(x, y + 1, palette.black);
+					if (y < h - 1) gridPixel(x, y + 1, palette.black);
 					if (y > 0) gridPixel(x, y - 1, palette.black);
 				}
 			}
@@ -1283,14 +1294,14 @@ namespace SCANsat.SCAN_Map
 
 			Texture2D tex = reuse;
 
-			if (tex == null || tex.width != mapwidth || tex.height != mapheight)
+			if (tex == null || tex.width != w || tex.height != h)
 			{
 				if (tex != null)
 					UnityEngine.Object.Destroy(tex);
-				tex = new Texture2D(mapwidth, mapheight, TextureFormat.ARGB32, false);
+				tex = new Texture2D(w, h, TextureFormat.ARGB32, false);
 			}
 
-			tex.ReadPixels(new Rect(0, 0, mapwidth, mapheight), 0, 0);
+			tex.ReadPixels(new Rect(0, 0, w, h), 0, 0);
 			tex.Apply();
 			RenderTexture.active = prev;
 			RenderTexture.ReleaseTemporary(rt);
