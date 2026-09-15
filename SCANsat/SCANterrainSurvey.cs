@@ -81,6 +81,16 @@ namespace SCANsat
 		}
 
 		/// <summary>
+		/// The body being swept right now, or null. SCANcontroller.OnDestroy's Data-source PQS sweep
+		/// skips this one body instead of standing down for the whole survey, so everything else still
+		/// unloads at scene change while a survey is running.
+		/// </summary>
+		internal static CelestialBody CurrentBody
+		{
+			get { return current; }
+		}
+
+		/// <summary>
 		/// Queue the survey if a SCANSAT_TERRAIN_SURVEY node asks for one. Once per game session.
 		/// </summary>
 		internal static void CheckForRequest()
