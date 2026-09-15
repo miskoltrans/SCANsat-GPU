@@ -40,7 +40,6 @@ namespace SCANsat.SCAN_Unity
 		private SCANresourceGlobal currentResource;
 		private List<SCANresourceGlobal> resources;
 
-		private bool mapGenerating;
 		private double degreeOffset;
 		private bool bodyBiome, bodyPQS;
 
@@ -829,15 +828,11 @@ namespace SCANsat.SCAN_Unity
 			int build = ++overlayBuild;
 			int timer = 0;
 
-			mapGenerating = true;
-
 			// Terrain draws from the body's 360x180 height map; pump its build from here if needed, as before.
 			if (selection == 1)
 			{
 				if (data.Body.pqsController == null)
 				{
-					if (build == overlayBuild)
-						mapGenerating = false;
 					yield break;
 				}
 
@@ -860,8 +855,6 @@ namespace SCANsat.SCAN_Unity
 
 				if (timer >= 2000 || build != overlayBuild)
 				{
-					if (build == overlayBuild)
-						mapGenerating = false;
 					yield break;
 				}
 			}
@@ -906,7 +899,7 @@ namespace SCANsat.SCAN_Unity
 			{
 				if (build != overlayBuild)
 				{
-					yield break;   // a newer build owns mapGenerating now
+					yield break;   // a newer build has taken over
 				}
 
 				overlayMap.getPartialMap();
@@ -918,8 +911,6 @@ namespace SCANsat.SCAN_Unity
 			{
 				yield break;
 			}
-
-			mapGenerating = false;
 
 			if (timer >= 20000 || !_overlayOn)
 			{

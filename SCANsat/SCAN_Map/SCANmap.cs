@@ -117,9 +117,9 @@ namespace SCANsat.SCAN_Map
 			get { return mSource; }
 		}
 
-		// The texture to display. A GPU-rendered Visual map is a RenderTexture (accepted by
-		// RawImage.texture / Graphics.Blit); otherwise the CPU-built Texture2D. Use this for
-		// on-screen display; use Map (Texture2D) for CPU readback such as PNG export.
+		// The texture to display: the RenderTexture the map was composited into, which RawImage.texture
+		// and Graphics.Blit both accept. Null until a render has happened. There is no Texture2D copy;
+		// PNG export re-composites (renderVisualExport) and SCANmapExporter reads that back.
 		public Texture DisplayTexture
 		{
 			get { return gpuRendered && visualRenderTex != null ? visualRenderTex : null; }
@@ -889,7 +889,7 @@ namespace SCANsat.SCAN_Map
 		// Per-source behaviour switches. Defaults are the map windows'; the planet overlay and the
 		// window maps' auto range change them through the properties below.
 		private bool sweepEnabled = true;    // false: no timed reveal, the pass is complete when the build is (planet overlay)
-		private bool biomeUnderlay = true;   // false: Biome samples no elevation for its underlay (small map, planet overlay)
+		private bool biomeUnderlay = true;   // false: Biome samples no elevation for its underlay. Only the planet overlay sets it; the small map leaves it on and forces _BiomeTransparency to 0 instead
 		private bool baseNone;               // true: no base layer, only the resource pass over clear (resource planet overlay)
 		private bool planetUV;               // true: columns in the planet's ScaledSpace UV layout, u = 0 at 90 E and longitude decreasing (planet overlays)
 		private bool autoRange;              // true: palette range fitted to the window's own samples (zoom map, RPM)

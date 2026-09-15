@@ -993,6 +993,14 @@ namespace SCANsat
 
 		public static CBAttributeMapSO.MapAttribute[] GetOrBuildPalette(CelestialBody body)
 		{
+			// Public, and third parties reflect into SCANUtil: a body with no biome map - a gas giant,
+			// a Kopernicus body still being built - must come back as "no palette", not an NRE. Every
+			// caller already falls back to the stock attributes when this returns null.
+			if (body == null || body.BiomeMap == null || body.BiomeMap.Attributes == null)
+			{
+				return null;
+			}
+
 			if (_scanBiomePaletteCache.TryGetValue(body.name, out var cached))
 			{
 				return cached;
@@ -1542,9 +1550,24 @@ namespace SCANsat
 			}
 		}
 
+		// A message with nothing to substitute into it is not a format string: an exception message,
+		// a file path or an interpolated string that already did its own substitution can hold a
+		// brace, and string.Format would throw FormatException on it. Overload resolution prefers
+		// these over the params versions for a single-string call, so no call site changes.
+		internal static void SCANlog(string log)
+		{
+			Log.Message(log);
+		}
+
 		internal static void SCANlog(string log, params object[] stringObjects)
 		{
 			Log.Message(string.Format(log, stringObjects));
+		}
+
+		[System.Diagnostics.Conditional("DEBUG")]
+		internal static void SCANdebugLog(string log)
+		{
+			Log.Debug(log);
 		}
 
 		[System.Diagnostics.Conditional("DEBUG")]

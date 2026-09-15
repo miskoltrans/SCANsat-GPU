@@ -408,10 +408,11 @@ namespace SCANsat.SCAN_Unity
 
 			spotmap.resetMap(ResourceToggle, narrowBand);
 
-			// DisplayTexture changes object identity between the CPU Texture2D and the GPU RenderTexture
-			// (Visual <-> the other modes, which are CPU-drawn on the zoom map). The RawImage is only
-			// re-pointed when updateMap is set, so a mode switch into Visual otherwise leaves it showing
-			// the never-painted CPU texture. Same fix the big map has in its map-type setter.
+			// Every mode renders on the GPU, but a mode switch can still hand back a different
+			// RenderTexture (a resize releases the old one), and DisplayTexture is null until the new
+			// map has composited once. The RawImage is only re-pointed when updateMap is set, so
+			// without this a mode switch leaves it on a released texture. Same as the big map's
+			// map-type setter.
 			updateMap = true;
 		}
 

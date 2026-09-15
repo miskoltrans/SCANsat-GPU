@@ -25,6 +25,7 @@ using KSP.UI.Screens;
 using KSP.Localization;
 using TMPro;
 using palette = SCANsat.SCAN_UI.UI_Framework.SCANcolorUtil;
+using Log = KSPCommunityLib.Logging.Log;
 
 namespace SCANsat.SCAN_Unity
 {
@@ -38,27 +39,27 @@ namespace SCANsat.SCAN_Unity
 		// The shader bundle is per platform (Unity compiles shaders per graphics API and a bundle only
 		// carries its build target's APIs; see Unity/SCANsat/Assets/Editor/Bundler.cs). When the
 		// platform's file is not shipped, fall back to the Windows bundle: its shaders then report
-		// unsupported on this graphics device and SCANmap degrades exactly as before.
-		private static string shadersAssetName
+		// unsupported on this graphics device and SCANmap degrades exactly as before. The lookup hits
+		// the disk, so it is resolved once in Awake (after path is set) instead of on every read.
+		private static string shadersAssetName = "scan_shaders.scan";
+
+		private static string resolveShadersAssetName()
 		{
-			get
+			string platformName;
+
+			switch (Application.platform)
 			{
-				string platformName;
-
-				switch (Application.platform)
-				{
-					case RuntimePlatform.LinuxPlayer:
-						platformName = "scan_shaders_linux.scan";
-						break;
-					case RuntimePlatform.OSXPlayer:
-						platformName = "scan_shaders_osx.scan";
-						break;
-					default:
-						return "scan_shaders.scan";
-				}
-
-				return System.IO.File.Exists(path + platformName) ? platformName : "scan_shaders.scan";
+				case RuntimePlatform.LinuxPlayer:
+					platformName = "scan_shaders_linux.scan";
+					break;
+				case RuntimePlatform.OSXPlayer:
+					platformName = "scan_shaders_osx.scan";
+					break;
+				default:
+					return "scan_shaders.scan";
 			}
+
+			return System.IO.File.Exists(path + platformName) ? platformName : "scan_shaders.scan";
 		}
 
 		private static bool loaded;
@@ -372,6 +373,7 @@ namespace SCANsat.SCAN_Unity
 			}
 
 			path = KSPUtil.ApplicationRootPath + "GameData/SCANsat/Resources/";
+			shadersAssetName = resolveShadersAssetName();
 
 			SCANUtil.SCANlog("Processing SCANsat asset bundles...");
 
@@ -431,10 +433,15 @@ namespace SCANsat.SCAN_Unity
 
 		private static void loadShaders()
 		{
-			AssetBundle shaders = AssetBundle.LoadFromFile(path + shadersAssetName);
+			// Every map mode draws through the composite shader now, so anything that goes wrong here
+			// means blank maps in every window. Each failure names the file it was reading.
+			string shaderPath = path + shadersAssetName;
+
+			AssetBundle shaders = AssetBundle.LoadFromFile(shaderPath);
 
 			if (shaders == null)
 			{
+				Log.Error("SCANsat shader asset bundle could not be loaded: " + shaderPath + "\nAll SCANsat maps will be blank");
 				return;
 			}
 
@@ -442,8 +449,11 @@ namespace SCANsat.SCAN_Unity
 
 			if (loadedShaders == null)
 			{
+				Log.Error("SCANsat shader asset bundle holds no shaders: " + shaderPath + "\nAll SCANsat maps will be blank");
 				return;
 			}
+
+			bool compositeFound = false;
 
 			for (int i = loadedShaders.Length - 1; i >= 0; i--)
 			{
@@ -455,6 +465,8 @@ namespace SCANsat.SCAN_Unity
 				}
 				else if (s.name == "Hidden/SCANsat/VisualComposite")
 				{
+					compositeFound = true;
+
 					// A shader can load from the bundle and still be unusable on this graphics API (it
 					// would render magenta). Treat that as "no shader" so SCANmap degrades cleanly.
 					if (s.isSupported)
@@ -463,9 +475,14 @@ namespace SCANsat.SCAN_Unity
 					}
 					else
 					{
-						SCANUtil.SCANlog("Shader {0} is not supported on {1}; Visual maps disabled", s.name, SystemInfo.graphicsDeviceType);
+						Log.Error("SCANsat shader " + s.name + " is not supported on " + SystemInfo.graphicsDeviceType + " (from " + shaderPath + ")\nAll SCANsat maps will be blank");
 					}
 				}
+			}
+
+			if (!compositeFound)
+			{
+				Log.Error("SCANsat shader Hidden/SCANsat/VisualComposite is not in " + shaderPath + "\nAll SCANsat maps will be blank");
 			}
 
 			SCANUtil.SCANlog("Shader asset bundle loaded; using platform bundle: {0}", shadersAssetName);
