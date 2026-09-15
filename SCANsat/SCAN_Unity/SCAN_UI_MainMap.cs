@@ -891,6 +891,10 @@ namespace SCANsat.SCAN_Unity
 				visualMap.resetMap(false, false);
 			}
 
+			// The CPU small map dimmed every pixel not covered by ALL of the active vessel's sensors;
+			// `sensors` is already refreshed once per Update (line 160), as it was there.
+			visualMap.SensorMask = sensors;
+
 			visualMap.getPartialMap();
 
 			showTexture(visualMap.DisplayTexture);

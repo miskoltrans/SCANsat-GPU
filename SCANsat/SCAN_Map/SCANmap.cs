@@ -104,6 +104,14 @@ namespace SCANsat.SCAN_Map
 			set { terminator = value; }
 		}
 
+		// The active vessel's scanner bitmask, for the small map's "not covered by your active sensors"
+		// dimming (SCANUtil.isCoveredByAll). Nothing = off; only mapSource.Data ever sets it.
+		public SCANtype SensorMask
+		{
+			get { return sensorMask; }
+			set { sensorMask = value; }
+		}
+
 		public mapSource MSource
 		{
 			get { return mSource; }
@@ -771,6 +779,7 @@ namespace SCANsat.SCAN_Map
 		private bool useCustomRange;
 		private bool colorMap;
 		private bool terminator;
+		private SCANtype sensorMask = SCANtype.Nothing;
 
 		/* GPU Visual-mode compositing: renders the Visual map on the GPU sampling the body's
 		   original ScaledSpace textures, so no readable CPU copy is needed. Dormant until the
@@ -1163,6 +1172,7 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetFloat("_RowMin", startLine);
 			compositeMaterial.SetFloat("_RowMax", stopLine);
 			compositeMaterial.SetFloat("_Grid", mSource == mapSource.Data ? 1f : 0f);   // the small map's dotted graticule; the big map's is a separate texture (renderGrid)
+			compositeMaterial.SetFloat("_SensorMask", (short)sensorMask);   // 0 for every source but the small map
 			compositeMaterial.SetFloat("_HasSource", colorTex != null ? 1f : 0f);
 			compositeMaterial.SetFloat("_NoData", gpuNoData() ? 1f : 0f);
 			compositeMaterial.SetFloat("_NoiseSeed", noiseSeed);

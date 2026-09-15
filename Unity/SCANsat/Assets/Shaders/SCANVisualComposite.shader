@@ -45,6 +45,8 @@ Shader "Hidden/SCANsat/VisualComposite"
 		_HasElevation ("Has Elevation", Float) = 1
 		_OutputAlpha ("Output Alpha", Float) = 1
 		_ResGreyBlend ("Resource Below-Range Grey Blend", Float) = 0.3
+		// 0 = off, so an unset material (a DLL that never sets it) draws exactly as before.
+		_SensorMask ("Active Sensor Mask", Float) = 0
 	}
 	SubShader
 	{
@@ -140,6 +142,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 			float _RowMax;
 
 			float _Grid;        // 1: the small map's dotted 30-degree graticule
+			float _SensorMask;  // small map only: the active vessel's SCANtype bitmask as a number; 0 = no dimming
 			float _HasSource;   // Visual: 0 when there is no colour texture for the body -> whole map _UnscannedColor (the old CPU fallback)
 			float _BaseNone;    // 1: no base layer at all, every pixel starts as _UnscannedColor (the resource-only planet overlay)
 			float _PlanetUV;    // 1: columns in the planet's ScaledSpace UV layout (u = 0 at 90 E, longitude decreasing) - the planet overlays
@@ -294,6 +297,24 @@ Shader "Hidden/SCANsat/VisualComposite"
 			bool covHas(float cov, float bit)  // bit = SCANtype exponent (AltLo=0,AltHi=1,VisLo=2,Biome=3,VisHi=6,ResLo=7,ResHi=8)
 			{
 				return fmod(floor(cov / exp2(bit)), 2.0) >= 0.5;
+			}
+
+			// SCANUtil.isCoveredByAll: every bit of `mask` present in `cov`. Float-only - no bitwise ops
+			// (they would need a target bump) and no bool carried in a value, so HLSLcc's Vulkan
+			// cross-compile stays clear of the bool/float movc trap. Bits 0..8 are every SCANsat
+			// scanner type (SCANtype.Everything_SCAN = (1 << 9) - 1).
+			float coveredByAll(float cov, float mask)
+			{
+				float missing = 0.0;
+				[unroll]
+				for (int b = 0; b < 9; b++)
+				{
+					float bit = exp2((float)b);
+					float m = fmod(floor(mask / bit), 2.0);   // the sensor mask has this bit
+					float c = fmod(floor(cov / bit), 2.0);    // the cell is covered for it
+					missing += m * (1.0 - c);
+				}
+				return step(missing, 0.5);   // 1 = covered by all
 			}
 
 			// Per-pixel black-white static for bodies with no data (the CPU renderers drew
@@ -523,11 +544,14 @@ Shader "Hidden/SCANsat/VisualComposite"
 					}
 				}
 
-				if (_Grid > 0.5)
+				// The CPU small map drew these dots ONLY in drawPartialMap's uncovered-by-altimetry else
+				// branch, in Terrain mode; drawBiomeMap drew none, and a body without PQS got its static
+				// with no dots. Altimetry mode, no-data off, and not covered by either altimetry bit
+				// (SCANtype.Altimetry is both, and isCovered tests for either).
+				if (_Grid > 0.5 && _MapMode < 0.5 && _NoData < 0.5 && !covHas(cov, 0.0) && !covHas(cov, 1.0))
 				{
-					// The small map's dotted 30-degree graticule (was SCAN_UI_MainMap.getMapPixelColor): a white
-					// dot every 3rd pixel along each 30-degree row and column. Applied before the terminator, as
-					// there. (The big map's graticule is a separate texture drawn point by point: SCANmap.renderGrid.)
+					// A white dot every 3rd pixel along each 30-degree row and column, before the terminator,
+					// as there. (The big map's graticule is a separate texture drawn point by point: SCANmap.renderGrid.)
 					if ((fmod(pix.y, 30.0) < 0.5 && fmod(pix.x, 3.0) < 0.5) || (fmod(pix.x, 30.0) < 0.5 && fmod(pix.y, 3.0) < 0.5))
 						col = float4(1.0, 1.0, 1.0, 1.0);
 				}
@@ -538,6 +562,16 @@ Shader "Hidden/SCANsat/VisualComposite"
 					float crossingLat = atan(_Gamma * sin(DEG2RAD * lon - DEG2RAD * _SunLonCenter)) * RAD2DEG;
 					bool night = _SunLatCenter >= 0.0 ? (lat < crossingLat) : (lat > crossingLat);
 					if (night)
+						col.rgb = lerp(col.rgb, float3(0.0, 0.0, 0.0), 0.5);
+				}
+				else if (_SensorMask > 0.5)
+				{
+					// "Not covered by your active sensors": with the terminator OFF, the CPU small map blended
+					// every pixel not covered by ALL of the vessel's active sensors 50 percent toward black, in
+					// both of its modes, after the grid, as the else of the terminator. _SensorMask == 0 is its
+					// `type != SCANtype.Nothing` guard and keeps every other map source out of it. The no-PQS
+					// static was skipped there too.
+					if (_NoData < 0.5 && coveredByAll(cov, _SensorMask) < 0.5)
 						col.rgb = lerp(col.rgb, float3(0.0, 0.0, 0.0), 0.5);
 				}
 
