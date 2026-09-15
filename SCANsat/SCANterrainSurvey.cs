@@ -168,6 +168,13 @@ namespace SCANsat
 				return;   // let the PQS finish loading before the first sample
 			}
 
+			// SCANcontroller.OnDestroy unloads every Data-source PQS at scene change (7a4036e4) and this
+			// survey's state is static, so a scene change part way through a body would otherwise leave
+			// it sampling terrain mods that are gone - silently, into numbers someone is about to author
+			// a pack from. loadPQS returns immediately for a body already claimed, so re-asserting the
+			// claim every frame costs nothing and heals the one case that matters.
+			SCANcontroller.controller.loadPQS(current);
+
 			long start = Stopwatch.GetTimestamp();
 			long budget = (long)(msPerFrame * Stopwatch.Frequency / 1000.0);
 
