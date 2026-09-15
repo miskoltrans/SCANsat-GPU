@@ -152,11 +152,13 @@ namespace SCANsat.SCAN_UI
 
 		// InternalModule has no teardown, so its per-instance Material + SCANmap (map texture/RT/material)
 		// leak on every IVA load / vessel switch. Free them here (Unity calls OnDestroy on component destroy).
+		// scaleBarTexture/scaleLabelTexture are NOT ours: GameDatabase owns them and hands the same instance
+		// to every prop that names the path, so they are dropped here, never destroyed.
 		private void OnDestroy()
 		{
 			if (iconMaterial != null) { UnityEngine.Object.Destroy(iconMaterial); iconMaterial = null; }
-			if (scaleBarTexture != null) { UnityEngine.Object.Destroy(scaleBarTexture); scaleBarTexture = null; }
-			if (scaleLabelTexture != null) { UnityEngine.Object.Destroy(scaleLabelTexture); scaleLabelTexture = null; }
+			scaleBarTexture = null;
+			scaleLabelTexture = null;
 			if (map != null) { map.Destroy(); map = null; }
 		}
 
@@ -248,7 +250,17 @@ namespace SCANsat.SCAN_UI
 
 			start = Planetarium.GetUniversalTime();
 
-			Graphics.Blit(map.DisplayTexture, screen);
+			Texture mapTexture = map.DisplayTexture;
+
+			// No GPU composite yet this pass (or nothing renders this map): blitting a null source would
+			// fill the MFD with the built-in blit material's default white. Report "not drawn" instead,
+			// like the map == null case above.
+			if (mapTexture == null)
+			{
+				return false;
+			}
+
+			Graphics.Blit(mapTexture, screen);
 			GL.PushMatrix();
 			GL.LoadPixelMatrix(0, screenWidth, screenHeight, 0);
 

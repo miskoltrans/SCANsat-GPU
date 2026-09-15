@@ -624,6 +624,17 @@ namespace SCANsat.SCAN_Map
 		// The owning window's OnDestroy calls this. Safe to call more than once.
 		internal void Destroy()
 		{
+			// Visual mode registers this body's textures with the controller (refreshVisualMapTexture) and
+			// nothing releases them when the owner simply goes away - an IVA exit, a vessel switch, a scene
+			// change. A stale claim also blocks every other map from freeing that body (the shared-body guard
+			// in UnloadVisualMapTexture), so release this source's claim here too. Idempotent: the per-source
+			// slot is nulled first, then the guard, then the dictionary lookup, so an owner that already
+			// released (big map, zoom map, main map) just no-ops.
+			if (SCANcontroller.controller != null && body != null)
+			{
+				SCANcontroller.controller.UnloadVisualMapTexture(body, mSource);
+			}
+
 			if (coverageFlags != null) { UnityEngine.Object.Destroy(coverageFlags); coverageFlags = null; }
 			if (compositeMaterial != null) { UnityEngine.Object.Destroy(compositeMaterial); compositeMaterial = null; }
 			if (visualRenderTex != null) { visualRenderTex.Release(); UnityEngine.Object.Destroy(visualRenderTex); visualRenderTex = null; }
