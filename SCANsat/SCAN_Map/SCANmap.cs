@@ -1404,10 +1404,7 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetTexture("_ScaledNormal", normalTex);
 			compositeMaterial.SetFloat("_HasNormal", normalTex != null ? 1f : 0f);
 			compositeMaterial.SetFloat("_NormalYChannel", normalYChannel);
-			compositeMaterial.SetFloat("_MapWidth", w);
-			compositeMaterial.SetFloat("_MapHeight", h);
-			compositeMaterial.SetFloat("_MapScale", (float)(mapscale * k));
-			compositeMaterial.SetFloat("_SweepY", 1f);
+			setFramingUniforms(w, h, mapscale * k);
 
 			Graphics.Blit(null, rt, compositeMaterial);
 
@@ -1939,14 +1936,25 @@ namespace SCANsat.SCAN_Map
 			rt.wrapMode = TextureWrapMode.Clamp;
 			rt.Create();
 
-			compositeMaterial.SetFloat("_MapWidth", w);
-			compositeMaterial.SetFloat("_MapHeight", h);
-			compositeMaterial.SetFloat("_MapScale", (float)(mapscale * w / mapwidth));
-			compositeMaterial.SetFloat("_RowMax", h - 1);
-			compositeMaterial.SetFloat("_SweepY", 1f);
+			setFramingUniforms(w, h, mapscale * w / mapwidth);
 
 			Graphics.Blit(null, rt, compositeMaterial);
 			return rt;
+		}
+
+		// Re-frame the last composite's uniforms for a one-off render at w x h: the same geographic
+		// window, more pixels. Everything the shader expresses in map pixels has to move together -
+		// the size, the pixels-per-degree, and the row window, which is what the on-screen composite
+		// set from startLine/stopLine and would otherwise clip the render to the on-screen height.
+		// A one-off render is never mid-sweep, so the reveal is complete.
+		private void setFramingUniforms(int w, int h, double scale)
+		{
+			compositeMaterial.SetFloat("_MapWidth", w);
+			compositeMaterial.SetFloat("_MapHeight", h);
+			compositeMaterial.SetFloat("_MapScale", (float)scale);
+			compositeMaterial.SetFloat("_RowMin", 0f);
+			compositeMaterial.SetFloat("_RowMax", h - 1);
+			compositeMaterial.SetFloat("_SweepY", 1f);
 		}
 
 		// Bodies the CPU renderers drew as black-white static: no PQS for Altimetry/Slope, no biome
