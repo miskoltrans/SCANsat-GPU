@@ -61,6 +61,7 @@ namespace SCANsat
 		private bool normalFailed;
 
 		private static HashSet<string> configuredBodies;
+		private static readonly HashSet<string> failedColorBodies = new HashSet<string>();
 
 		public bool HasConfig
 		{
@@ -75,6 +76,12 @@ namespace SCANsat
 		public Texture NormalTexture
 		{
 			get { return normalTex; }
+		}
+
+		/// <summary>The declared colorMap will not load: the cfg cannot serve this body's Visual map.</summary>
+		public bool ColorFailed
+		{
+			get { return colorFailed; }
 		}
 
 		/// <summary>Which normal-map channel carries Y for the shader: 1 = green (DXT5nm, BC5), 0 = blue.</summary>
@@ -96,7 +103,8 @@ namespace SCANsat
 		}
 
 		/// <summary>True when a SCANSAT_BODY_TEXTURES node declares a colorMap for the body (cached from GameDatabase).</summary>
-		/// Only then does the cfg replace ScaledSpace as the Visual source, so only then is OnDemand skipped.
+		/// Declarative only - whether the file actually loads is another matter, so the OnDemand paths
+		/// ask UseConfigFor, not this.
 		public static bool HasConfigFor(CelestialBody b)
 		{
 			if (b == null)
@@ -122,6 +130,23 @@ namespace SCANsat
 			}
 
 			return configuredBodies.Contains(b.name);
+		}
+
+		/// <summary>
+		/// True while the cfg really is this body's Visual source: a node declares a colorMap and that
+		/// file has not failed to load. Only then can Kopernicus OnDemand be left alone - once the
+		/// declared colour map is unusable the body needs its own ScaledSpace textures like any other.
+		/// Static, so it still answers after the body's SCANtextures handler has been released.
+		/// </summary>
+		public static bool UseConfigFor(CelestialBody b)
+		{
+			return HasConfigFor(b) && !failedColorBodies.Contains(b.name);
+		}
+
+		/// <summary>Records a failed colorMap; true the first time, so the caller logs once per session.</summary>
+		public static bool MarkColorFailed(CelestialBody b)
+		{
+			return b != null && failedColorBodies.Add(b.name);
 		}
 
 		public SCANtextures(CelestialBody b)
@@ -595,7 +620,8 @@ namespace SCANsat
 		/// The Visual map's GPU source textures for a body, for a map that needs targetWidth pixels
 		/// across 360 degrees. A SCANSAT_BODY_TEXTURES cfg wins: its files are loaded at the mip that
 		/// covers the request and Kopernicus OnDemand is never involved. Otherwise the body's own
-		/// ScaledSpace textures, which must already be resident (see getScaledSpaceSource).
+		/// ScaledSpace textures, which must already be resident (see getScaledSpaceSource) - or are
+		/// paged in here when a cfg the OnDemand paths trusted turns out not to load (see cfgFallback).
 		/// </summary>
 		internal bool getVisualSource(CelestialBody b, int targetWidth, out Texture colorTex, out Texture normalTex, out int normalYChannel, out bool fromConfig)
 		{
@@ -609,7 +635,9 @@ namespace SCANsat
 				return false;
 			}
 
-			if (mapTextureHandler.TryGetValue(b, out SCANtextures t) && t.HasConfig && t.EnsureLoaded(targetWidth))
+			mapTextureHandler.TryGetValue(b, out SCANtextures t);
+
+			if (t != null && t.HasConfig && t.EnsureLoaded(targetWidth))
 			{
 				colorTex = t.ColorTexture;
 				normalTex = t.NormalTexture;
@@ -620,11 +648,43 @@ namespace SCANsat
 
 			if (!getScaledSpaceSource(b, out colorTex, out normalTex, out _, out _))
 			{
-				return false;
+				// A cfg body whose colour map would not load: OnDemand was told to skip it back in
+				// setBody, before the load could fail, so its own textures are not resident. Page them
+				// in here and take them instead of showing nothing.
+				if (!cfgFallback(b, t) || !getScaledSpaceSource(b, out colorTex, out normalTex, out _, out _))
+				{
+					colorTex = null;   // never hand back OnDemand's 1x1 placeholder (getScaledSpaceSource assigns it before rejecting it)
+					normalTex = null;
+					return false;
+				}
 			}
 
 			Texture2D n2d = normalTex as Texture2D;
 			normalYChannel = n2d != null ? SCANtextures.NormalYChannelFor(n2d.format) : 0;
+			return true;
+		}
+
+		/// <summary>
+		/// The body declares a SCANSAT_BODY_TEXTURES colorMap that will not load. The cfg promised to
+		/// replace ScaledSpace, so loadOnDemandScaledSpace skipped this body - the skip happens in
+		/// setBody, before the first EnsureLoaded, so the failure is only known here. Remember it (both
+		/// OnDemand paths treat the body as an ordinary one from now on) and ask Kopernicus for its
+		/// textures. Not one-shot: two maps on the same body can evict each other's copy, and the next
+		/// composite has to be able to ask again.
+		/// </summary>
+		private bool cfgFallback(CelestialBody b, SCANtextures t)
+		{
+			if (t == null || !t.ColorFailed || b.scaledBody == null || !SCAN_Settings_Config.Instance.VisibleMapsActive)
+			{
+				return false;
+			}
+
+			if (SCANtextures.MarkColorFailed(b))
+			{
+				Log.Error($"[{b.bodyName}] Visual: SCANSAT_BODY_TEXTURES colorMap \"{t.colorMapPath}\" could not be loaded; falling back to this body's ScaledSpace textures");
+			}
+
+			SCANkopernicus.LoadOnDemand(b);
 			return true;
 		}
 
@@ -1800,8 +1860,9 @@ namespace SCANsat
 		{
 			// Bodies with a SCANSAT_BODY_TEXTURES cfg never touch Kopernicus OnDemand: the Visual map
 			// reads its own mip of the declared files, so forcing the full-size ScaledSpace textures in
-			// (or out) would only cost VRAM and a stall.
-			if (SCANtextures.HasConfigFor(b))
+			// (or out) would only cost VRAM and a stall. A body whose declared colour map failed to
+			// load is not one of them any more (see UseConfigFor): it pages in and out like any other.
+			if (SCANtextures.UseConfigFor(b))
 			{
 				return;
 			}
@@ -1861,8 +1922,9 @@ namespace SCANsat
 		{
 			// Bodies with a SCANSAT_BODY_TEXTURES cfg never touch Kopernicus OnDemand: the Visual map
 			// reads its own mip of the declared files, so forcing the full-size ScaledSpace textures in
-			// (or out) would only cost VRAM and a stall.
-			if (SCANtextures.HasConfigFor(b))
+			// (or out) would only cost VRAM and a stall. A body whose declared colour map failed to
+			// load is not one of them any more (see UseConfigFor): it pages in and out like any other.
+			if (SCANtextures.UseConfigFor(b))
 			{
 				return;
 			}
