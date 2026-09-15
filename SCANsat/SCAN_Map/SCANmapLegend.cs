@@ -177,8 +177,23 @@ namespace SCANsat.SCAN_Map
 		/// <returns>IList<string> containing the three legend labels to display.</returns>
 		public static IList<string> LegendLabels(double terrainMin, double terrainMax)
 		{
-			int digits = (int)Math.Floor(Math.Log10(terrainMax - terrainMin));
-			int round = (int)Math.Pow(10, digits - 1);
+			// The rounding step is 10^(digits-1), two significant figures of the range. That step is
+			// 0 for any range narrower than 10 m - it rounds 10^-1 down to 0 - and Log10 of a range
+			// of 0 (a flat body, or a config whose min and max were set equal) is -infinity, either
+			// of which printed every label as "0". Below the width where a step means anything, round
+			// to whole metres.
+			double span = terrainMax - terrainMin;
+			int round = 1;
+
+			if (span > 0)
+			{
+				int digits = (int)Math.Floor(Math.Log10(span));
+
+				if (digits > 1)
+				{
+					round = (int)Math.Pow(10, Math.Min(digits - 1, 9));
+				}
+			}
 
 			string one = string.Format("|\n{0}", (((int)Math.Round(terrainMin / round)) * round).ToString("N0"));
 

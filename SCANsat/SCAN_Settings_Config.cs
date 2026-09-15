@@ -76,7 +76,10 @@ namespace SCANsat
 		public bool TrueGreyScale = false;
 		[Persistent]
 		public bool ExportCSV = false;
-		// Visual maps are texture-backed, so PNG export can render them larger than the on-screen map. 0 = as shown.
+		// PNG export width for the Visual map, which is texture-backed and so can be re-rendered
+		// larger than the on-screen map: 0 exports at the on-screen size, any other value re-renders
+		// up to this many pixels wide (capped at 16384) and never below the on-screen width. The
+		// data-backed modes are sampled per map pixel and always export at the on-screen size.
 		[Persistent]
 		public int VisualExportWidth = 4096;
 		[Persistent]

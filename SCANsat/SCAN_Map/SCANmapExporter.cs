@@ -21,8 +21,8 @@ namespace SCANsat.SCAN_Map
 
 		public void exportPNG(SCANmap map, SCANdata data)
 		{
-			exporting = true;
-
+			// Nothing was claimed yet, so these return before the flag is raised; raising it here
+			// would block every later export.
 			if (map == null)
 			{
 				return;
@@ -33,91 +33,116 @@ namespace SCANsat.SCAN_Map
 				return;
 			}
 
-			string path = Path.Combine(new DirectoryInfo(KSPUtil.ApplicationRootPath).FullName, "GameData/SCANsat/PluginData/").Replace("\\", "/");
-			string mode = "";
+			exporting = true;
 
-			switch (map.MType)
-			{
-				case mapType.Altimetry: mode = "elevation"; break;
-				case mapType.Slope: mode = "slope"; break;
-				case mapType.Biome: mode = "biome"; break;
-				case mapType.Visual: mode = "visual"; break;
-			}
-
-			if (map.ResourceActive && SCANconfigLoader.GlobalResource && !string.IsNullOrEmpty(SCANcontroller.controller.bigMapResource))
-			{
-				mode += "-" + SCANcontroller.controller.bigMapResource;
-			}
-
-			if (!SCANcontroller.controller.bigMapColor)
-			{
-				mode += "-grey";
-			}
-
-			// Maps live in a RenderTexture; read it back into a Texture2D for EncodeToPNG (which is
-			// Texture2D-only). A map that never rendered (shader unavailable) has nothing to export.
+			// The readback allocates a Texture2D as wide as VisualExportWidth (~32 MB at 4096) on top
+			// of a full-size RenderTexture, and the write that follows can throw on its own: a
+			// read-only PluginData, a full disk. Everything from here to the .csv hand-off is in a
+			// try/finally so the failure frees both and drops the flag, instead of leaking the texture
+			// and leaving Exporting true, which makes SCANmap.exportPNG refuse every later export.
+			RenderTexture hiRes = null;
+			RenderTexture prevActive = RenderTexture.active;
 			Texture2D exportTexture = null;
 			bool tempExportTexture = false;
+			bool csvStarted = false;
 
-			if (map.GpuRendered && map.VisualRenderTexture != null)
+			try
 			{
-				// Visual is texture-backed, so it can be exported above the on-screen size (VisualExportWidth);
-				// the data-backed modes are sampled per map pixel and export as rendered.
-				RenderTexture hiRes = map.renderVisualExport(SCAN_Settings_Config.Instance.VisualExportWidth);
-				RenderTexture rt = hiRes != null ? hiRes : map.VisualRenderTexture;
-				RenderTexture prev = RenderTexture.active;
-				RenderTexture.active = rt;
-				exportTexture = new Texture2D(rt.width, rt.height, TextureFormat.ARGB32, false);
-				exportTexture.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
-				exportTexture.Apply();
-				RenderTexture.active = prev;
-				tempExportTexture = true;
+				string path = Path.Combine(new DirectoryInfo(KSPUtil.ApplicationRootPath).FullName, "GameData/SCANsat/PluginData/").Replace("\\", "/");
+				string mode = "";
+
+				switch (map.MType)
+				{
+					case mapType.Altimetry: mode = "elevation"; break;
+					case mapType.Slope: mode = "slope"; break;
+					case mapType.Biome: mode = "biome"; break;
+					case mapType.Visual: mode = "visual"; break;
+				}
+
+				if (map.ResourceActive && SCANconfigLoader.GlobalResource && !string.IsNullOrEmpty(SCANcontroller.controller.bigMapResource))
+				{
+					mode += "-" + SCANcontroller.controller.bigMapResource;
+				}
+
+				if (!SCANcontroller.controller.bigMapColor)
+				{
+					mode += "-grey";
+				}
+
+				// Maps live in a RenderTexture; read it back into a Texture2D for EncodeToPNG (which is
+				// Texture2D-only). A map that never rendered (shader unavailable) has nothing to export.
+				if (map.GpuRendered && map.VisualRenderTexture != null)
+				{
+					// Visual is texture-backed, so it can be exported above the on-screen size (VisualExportWidth);
+					// the data-backed modes are sampled per map pixel and export as rendered.
+					hiRes = map.renderVisualExport(SCAN_Settings_Config.Instance.VisualExportWidth);
+					RenderTexture rt = hiRes != null ? hiRes : map.VisualRenderTexture;
+					RenderTexture.active = rt;
+					exportTexture = new Texture2D(rt.width, rt.height, TextureFormat.ARGB32, false);
+					exportTexture.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
+					exportTexture.Apply();
+					tempExportTexture = true;
+				}
+
+				if (exportTexture == null)
+				{
+					return;
+				}
+
+				int exportWidth = exportTexture.width;
+				int exportHeight = exportTexture.height;
+
+				string baseFileName = string.Format("{0}_{1}_{2}x{3}", map.Body.bodyName, mode, exportWidth, exportHeight);
+
+				if (map.Projection != MapProjection.Rectangular)
+				{
+					baseFileName += "_" + map.Projection.ToString();
+				}
+
+				string filename = baseFileName;
+
+				filename += ".png";
+
+				string fullPath = Path.Combine(path, filename);
+
+				File.WriteAllBytes(fullPath, exportTexture.EncodeToPNG());
+
+				ScreenMessages.PostScreenMessage("SCANsat Map saved: GameData/SCANsat/PluginData/" + filename, 8, ScreenMessageStyle.UPPER_CENTER);
+
+				SCANUtil.SCANlog("Map of [{0}] saved\nMap Size: {1} X {2}\nMinimum Altitude: {3:F0}m; Maximum Altitude: {4:F0}m\nPixel Width At Equator: {5:F6}m", map.Body.displayName.LocalizeBodyName(), exportWidth, exportHeight, SCANUtil.getTerrainConfig(data).MinTerrain, SCANUtil.getTerrainConfig(data).MaxTerrain, (map.Body.Radius * 2 * Math.PI) / (exportWidth * 1f));
+
+				if (SCAN_Settings_Config.Instance.ExportCSV && map.MType == mapType.Altimetry)
+				{
+					StartCoroutine(exportCSV(path, baseFileName, map, data));
+					csvStarted = true;
+				}
+			}
+			catch (Exception e)
+			{
+				Log.Error("Something went wrong while exporting the map image\n" + e);
+				ScreenMessages.PostScreenMessage("SCANsat map export failed; see the log", 8, ScreenMessageStyle.UPPER_CENTER);
+			}
+			finally
+			{
+				RenderTexture.active = prevActive;
 
 				if (hiRes != null)
 				{
 					hiRes.Release();
 					UnityEngine.Object.Destroy(hiRes);
 				}
-			}
 
-			if (exportTexture == null)
-			{
-				exporting = false;
-				return;
-			}
+				if (tempExportTexture && exportTexture != null)
+				{
+					UnityEngine.Object.Destroy(exportTexture);
+				}
 
-			int exportWidth = exportTexture.width;
-			int exportHeight = exportTexture.height;
-
-			string baseFileName = string.Format("{0}_{1}_{2}x{3}", map.Body.bodyName, mode, exportWidth, exportHeight);
-
-			if (map.Projection != MapProjection.Rectangular)
-			{
-				baseFileName += "_" + map.Projection.ToString();
-			}
-
-			string filename = baseFileName;
-
-			filename += ".png";
-
-			string fullPath = Path.Combine(path, filename);
-
-			File.WriteAllBytes(fullPath, exportTexture.EncodeToPNG());
-
-			if (tempExportTexture)
-				UnityEngine.Object.Destroy(exportTexture);
-
-			ScreenMessages.PostScreenMessage("SCANsat Map saved: GameData/SCANsat/PluginData/" + filename, 8, ScreenMessageStyle.UPPER_CENTER);
-
-			SCANUtil.SCANlog("Map of [{0}] saved\nMap Size: {1} X {2}\nMinimum Altitude: {3:F0}m; Maximum Altitude: {4:F0}m\nPixel Width At Equator: {5:F6}m", map.Body.displayName.LocalizeBodyName(), exportWidth, exportHeight, SCANUtil.getTerrainConfig(data).MinTerrain, SCANUtil.getTerrainConfig(data).MaxTerrain, (map.Body.Radius * 2 * Math.PI) / (exportWidth * 1f));
-
-			if (SCAN_Settings_Config.Instance.ExportCSV && map.MType == mapType.Altimetry)
-			{
-				StartCoroutine(exportCSV(path, baseFileName, map, data));
-			}
-			else
-			{
-				exporting = false;
+				// The .csv coroutine drops the flag when its thread is done; every other path is
+				// finished with it here.
+				if (!csvStarted)
+				{
+					exporting = false;
+				}
 			}
 		}
 
