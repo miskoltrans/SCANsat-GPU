@@ -136,7 +136,17 @@ namespace SCANsat
 
 				if (b == null || b.pqsController == null)
 				{
-					continue;   // gas giants and other PQS-less bodies have nothing to measure
+					continue;   // no surface to measure
+				}
+
+				// A gas giant can still carry a PQS, and sampling it returns nonsense - RSS Jupiter
+				// measured -4602309 m to 0 m, Saturn -5800990 m to 0 m, both extremes sitting on the
+				// first sample of the sweep. generateTerrainConfig rejects the same bodies by the same
+				// test (its "Gas Giant / Flat Body" throw), which is why their range is the default.
+				if (b.pqsController.radiusMin == b.pqsController.radiusMax)
+				{
+					SCANUtil.SCANlog("[{0}] skipped: flat or gas giant PQS (radiusMin == radiusMax), nothing to measure", b.bodyName);
+					continue;
 				}
 
 				if (named.Count > 0 && !named.Contains(b.bodyName))
