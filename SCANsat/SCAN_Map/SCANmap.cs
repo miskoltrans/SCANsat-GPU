@@ -569,20 +569,24 @@ namespace SCANsat.SCAN_Map
 			stopLine = stop == 0 ? mapheight - 1 : stop;
 			// Window-map caches, pixel space (see prepRow): the GPU data path fills them per rendered
 			// pixel, so the zoom map and RPM render Altimetry/Slope/Biome the way the big map does.
-			big_heightmap = new float[mapwidth, mapheight];
-			biome_indexmap = new float[mapwidth, mapheight];
-			biomeRowCached = new bool[mapheight];
-			gpuDataBuf = null;   // ensureDataTex sizes it
+			// Sized by ensureModeCaches on the next reset, for the mode that actually reads them: a
+			// window map that only ever shows Altimetry never allocates the biome index.
+			big_heightmap = null;
+			biome_indexmap = null;
+			biomeRowCached = null;
 			invalidateGpuDataCache();
 			resourceMapWidth = mapwidth;
 			resourceMapHeight = mapheight;
-			resourceCache = new float[resourceMapWidth, resourceMapHeight];
+			resourceCache = null;   // buildResourceCache sizes it when a resource layer is actually on
 			resourceInterpolation = interpolation;
 			resourceMapScale = resourceMapWidth / 360;
 			randomEdges = false;
 		}
 
-		internal void setWidth(int w)
+		// reset: false for a caller that resets itself straight after with the real mode - the planet
+		// overlay, which would otherwise reset twice per build, the first time with the previous
+		// selection's mType and a coverageChecksum over 64,800 cells thrown away two lines later.
+		internal void setWidth(int w, bool reset = true)
 		{
 			if (w == 0)
 			{
@@ -608,22 +612,24 @@ namespace SCANsat.SCAN_Map
 			resourceMapWidth = resourceMapHeight * 2;
 			resourceInterpolation = SCAN_Settings_Config.Instance.Interpolation;
 			resourceMapScale = resourceMapWidth / 360f;
-			resourceCache = new float[resourceMapWidth, resourceMapHeight];
+			resourceCache = null;   // buildResourceCache sizes it when a resource layer is actually on
 			randomEdges = true;
 			mapscale = mapwidth / 360f;
 			mapheight = (int)(w / 2);
 			startLine = 0;
 			stopLine = mapheight - 1;
-			/* big map caching */
-			big_heightmap = new float[mapwidth, mapheight];
-			biome_indexmap = new float[mapwidth, mapheight];
-			biomeRowCached = new bool[mapheight];
-			gpuDataBuf = new Color[mapwidth * mapheight];
-			// Just wiped big_heightmap/biome_indexmap/gpuDataBuf. mapwidth is part of gpuConfigHash so
+			/* big map caching: sized per mode by ensureModeCaches on the reset below */
+			big_heightmap = null;
+			biome_indexmap = null;
+			biomeRowCached = null;
+			// Just wiped big_heightmap/biome_indexmap. mapwidth is part of gpuConfigHash so
 			// the stale claim can't match today, but the caches are empty either way - don't leave a
 			// "data is complete" flag standing behind them.
 			invalidateGpuDataCache();
-			resetMap(resourceActive);
+			if (reset)
+			{
+				resetMap(resourceActive);
+			}
 		}
 
 		// Free the Unity objects this map owns. Texture2D/RenderTexture/Material are NOT GC-managed
@@ -661,6 +667,56 @@ namespace SCANsat.SCAN_Map
 			// re-Blits from biomeIndexTex/elevationTex that are now null - a blank map until you switch
 			// body (which changes the hash) and back.
 			invalidateGpuDataCache();
+
+			// The managed caches too. bigmap/spotmap being STATIC is exactly why: without this their
+			// arrays stay resident for the whole session, across every scene change, for a window that
+			// may never open again - 4 MB of biome index and half a MB of resource cache on a 1440x720
+			// RSS map. The elevation cache is the exception: it holds this body's PQS samples, which
+			// cost seconds to take on RSS (8188f282), and prepRow's "unsampled" check reuses them on the
+			// next pass even though the data textures are gone. The biome index is one stock biome-map
+			// lookup per pixel to refill, and resetMap zeroes the resource cache on every pass anyway,
+			// so neither is worth carrying. ensureModeCaches re-sizes whatever the next pass reads.
+			biome_indexmap = null;
+			biomeRowCached = null;
+			resourceCache = null;
+			gpuRowBuf = null;
+		}
+
+		// The data caches, sized for the mode that is about to run and no other. Altimetry and Slope
+		// read the elevation cache; Biome reads the biome index, plus elevation only when it draws the
+		// underlay (_HasElevation); the resource layer is the only reader of resourceCache, and
+		// buildResourceCache sizes that one itself. Called from resetMap, so a pass always has what it
+		// needs before willRenderGPU is asked. A body with no PQS or no biome map samples nothing
+		// (gpuNoData - the shader draws static there), so it gets no cache at all.
+		private void ensureModeCaches()
+		{
+			if (mapwidth <= 0 || mapheight <= 0)
+			{
+				return;
+			}
+
+			// baseNone: the resource-only planet overlay, whose build buildGpuDataFrame short-circuits.
+			bool wantElev = !baseNone && pqs
+				&& (mType == mapType.Altimetry || mType == mapType.Slope || (mType == mapType.Biome && biomeUnderlay));
+			bool wantBiome = !baseNone && biomeMap && mType == mapType.Biome;
+
+			if (wantElev && (big_heightmap == null || big_heightmap.GetLength(0) != mapwidth || big_heightmap.GetLength(1) != mapheight))
+			{
+				big_heightmap = new float[mapwidth, mapheight];
+			}
+
+			if (wantBiome)
+			{
+				if (biome_indexmap == null || biome_indexmap.GetLength(0) != mapwidth || biome_indexmap.GetLength(1) != mapheight)
+				{
+					biome_indexmap = new float[mapwidth, mapheight];
+					biomeRowCached = new bool[mapheight];
+				}
+				else if (biomeRowCached == null || biomeRowCached.Length != mapheight)
+				{
+					biomeRowCached = new bool[mapheight];
+				}
+			}
 		}
 
 		/// <summary>
@@ -810,7 +866,6 @@ namespace SCANsat.SCAN_Map
 			private int passBuildFrames;
 			private float passBuildStart = -1f;
 			private float passBuildMs;
-			private Color[] gpuDataBuf;
 			private Color[] gpuRowBuf;
 			private bool resourceTexReady;
 			private bool resourceCacheReady;   // resourceCache is built this reset (by the prep loop or the lazy GPU build)
@@ -954,6 +1009,7 @@ namespace SCANsat.SCAN_Map
 			coverageFlagsDirty = true;   // new pass: refresh the GPU coverage stencil once from live coverage
 			noRenderLogged = false;
 			resourceActive = resourceOn;
+			ensureModeCaches();   // this pass's caches, and only this pass's
 			if (SCANconfigLoader.GlobalResource && setRes)
 			{ //Make sure that a resource is initialized if necessary
 				if (resource != null && body != null)
@@ -1037,7 +1093,7 @@ namespace SCANsat.SCAN_Map
 					resourceMapHeight = SCAN_Settings_Config.Instance.ResourceMapHeight;
 					resourceMapWidth = resourceMapHeight * 2;
 					resourceMapScale = resourceMapWidth / 360f;
-					resourceCache = new float[resourceMapWidth, resourceMapHeight];
+					resourceCache = null;   // the new size is buildResourceCache's to allocate, if a layer asks
 				}
 
 				if (SCAN_Settings_Config.Instance.Interpolation != resourceInterpolation)
@@ -1046,12 +1102,10 @@ namespace SCANsat.SCAN_Map
 				}
 			}
 
-			for (int i = 0; i < resourceMapWidth; i++)
+			// Null until a resource layer has actually run on this map (buildResourceCache sizes it).
+			if (resourceCache != null)
 			{
-				for (int j = 0; j < resourceMapHeight; j++)
-				{
-					resourceCache[i, j] = 0;
-				}
+				System.Array.Clear(resourceCache, 0, resourceCache.Length);
 			}
 		}
 
@@ -1098,12 +1152,14 @@ namespace SCANsat.SCAN_Map
 				// The setting disables Visual maps outright (the CPU path only honoured it by accident). A
 				// body without a source texture still renders on the GPU: the shader draws unscanned (_HasSource).
 				case mapType.Visual: return SCAN_Settings_Config.Instance.VisibleMapsActive;
-				// The data modes need the caches: geographic for the big map (setWidth), pixel space for a
-				// window map (setSize). A body without PQS or without a biome map still renders on the GPU:
-				// the shader draws the CPU renderers' black-white static there (_NoData).
+				// The data modes need a size: geographic for the big map (setWidth), pixel space for a
+				// window map (setSize). ensureModeCaches allocates the mode's own cache in resetMap, so an
+				// array is not the test here - a lazily sized map would fail it and fall through to "no
+				// renderer", a blank window. A body without PQS or without a biome map still renders on the
+				// GPU: the shader draws the CPU renderers' black-white static there (_NoData).
 				case mapType.Altimetry:
-				case mapType.Slope: return big_heightmap != null;
-				case mapType.Biome: return biome_indexmap != null;
+				case mapType.Slope:
+				case mapType.Biome: return mapwidth > 0 && mapheight > 0;
 				default: return false;
 			}
 		}
@@ -1614,16 +1670,22 @@ namespace SCANsat.SCAN_Map
 
 		// Ensure the mode's R-float data texture exists (cleared to 0). Rows are then staged by
 		// stageDataRow as the prep fills the cache and uploaded once per frame (buildGpuDataFrame).
+		// A new Texture2D's contents are undefined, so the fresh texture is zeroed through its own raw
+		// CPU buffer - GetRawTextureData<float> is a view over storage Unity has already allocated, not
+		// a copy. The full-size Color[] mirror this replaced cost 16 bytes a pixel, 16 MB standing per
+		// 1440x720 map, to clear each texture once.
 		private void ensureDataTex(ref Texture2D tex)
 		{
 			if (tex != null && tex.width == mapwidth && tex.height == mapheight) return;
 			if (tex != null) UnityEngine.Object.Destroy(tex);
 			tex = new Texture2D(mapwidth, mapheight, TextureFormat.RFloat, false);
 			tex.wrapMode = TextureWrapMode.Clamp;
-			if (gpuDataBuf == null || gpuDataBuf.Length != mapwidth * mapheight)
-				gpuDataBuf = new Color[mapwidth * mapheight];
-			System.Array.Clear(gpuDataBuf, 0, gpuDataBuf.Length);
-			tex.SetPixels(gpuDataBuf);
+			// TextureFormat.RFloat is one float per pixel, so this view is exactly mapwidth * mapheight
+			// long. global:: because this namespace is SCANsat.SCAN_Map, where a bare "Unity" binds to
+			// SCANsat.Unity rather than to UnityEngine's Unity.Collections.
+			global::Unity.Collections.NativeArray<float> raw = tex.GetRawTextureData<float>();
+			for (int i = 0; i < raw.Length; i++)
+				raw[i] = 0f;
 			tex.Apply(false);
 		}
 
@@ -1644,6 +1706,13 @@ namespace SCANsat.SCAN_Map
 		// path) skip the prep loop that normally builds it, and resetResourceMap clears it every reset.
 		private void buildResourceCache()
 		{
+			// The one owner of this array's size: generateResourceCache writes into it and never
+			// allocates, and nothing else in the class does now - a map with no resource layer keeps none.
+			if (resourceCache == null || resourceCache.GetLength(0) != resourceMapWidth || resourceCache.GetLength(1) != resourceMapHeight)
+			{
+				resourceCache = new float[resourceMapWidth, resourceMapHeight];
+			}
+
 			SCANuiUtil.generateResourceCache(ref resourceCache, resourceMapHeight, resourceMapWidth, resourceInterpolation, resourceMapScale, this);
 			if (autoRange)
 				applyAutoResourceRange();   // from the sampled cells, before interpolation fills the gaps
@@ -2188,7 +2257,7 @@ namespace SCANsat.SCAN_Map
 					// for a cached row, biome_indexmap already holds it - plus the elevation rows for its underlay.
 					if (mType == mapType.Biome)
 					{
-						if (!biomeRowCached[mapstep])
+						if (biome_indexmap != null && !biomeRowCached[mapstep])
 						{
 							for (int bi = 0; bi < mapwidth; bi++)
 								biome_indexmap[bi, mapstep] = (float)biomeIndex[bi];
@@ -2198,10 +2267,17 @@ namespace SCANsat.SCAN_Map
 						stageDataRow(biomeIndexTex, biome_indexmap, mapstep);
 						biomeDirty = true;
 					}
-					ensureDataTex(ref elevationTex);
-					if (mapstep == 0) stageDataRow(elevationTex, big_heightmap, 0);
-					stageDataRow(elevationTex, big_heightmap, mapstep + 1);
-					elevDirty = true;
+					// Only a mode that samples elevation gets an elevation texture. A Biome map with no
+					// underlay (the small map, the biome planet overlay) staged a full row of zeros per row
+					// into an RFloat texture the shader never reads (_HasElevation 0) - 2 MB and a full
+					// Apply per build frame for the 1024x512 biome overlay.
+					if (big_heightmap != null)
+					{
+						ensureDataTex(ref elevationTex);
+						if (mapstep == 0) stageDataRow(elevationTex, big_heightmap, 0);
+						stageDataRow(elevationTex, big_heightmap, mapstep + 1);
+						elevDirty = true;
+					}
 				}
 
 				mapstep++;

@@ -129,7 +129,12 @@ namespace SCANsat.SCAN_Map
 
 			float[,] copyHeightMap = new float[map.MapWidth, map.MapHeight];
 
-			Array.Copy(map.Big_HeightMap, copyHeightMap, map.MapWidth * map.MapHeight);
+			// The map sizes its elevation cache only for the modes that read it, and a body with no PQS
+			// never gets one: export the zeroed copy rather than throwing on the way out.
+			if (map.Big_HeightMap != null)
+			{
+				Array.Copy(map.Big_HeightMap, copyHeightMap, map.MapWidth * map.MapHeight);
+			}
 
 			int width = map.MapWidth;
 			int height = map.MapHeight;
