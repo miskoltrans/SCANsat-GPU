@@ -206,6 +206,38 @@ namespace SCANsat
 			return colorTex != null;
 		}
 
+		/// <summary>Ceiling on a single resident source texture, compressed or not.</summary>
+		private const long TextureBudget = 32L * 1048576;
+
+		/// <summary>
+		/// Size of the GPU downscale kept in place of the base level of a file with no mip chain: about
+		/// two texels per map pixel, as the mip pick, never wider than the source and never over the same
+		/// 32 MiB budget. False when the file has a mip chain, or when the downscale would not be clearly
+		/// smaller than the base level and so is not worth the blit.
+		/// </summary>
+		private static bool downscaleSize(SCANddsHeader header, int targetWidth, out int w, out int h)
+		{
+			w = 0;
+			h = 0;
+
+			if (header.MipCount != 1)
+			{
+				return false;
+			}
+
+			w = Mathf.Min(header.Width, Mathf.NextPowerOfTwo(Mathf.Max(1, targetWidth) * 2));
+			h = Mathf.Max(1, (int)((long)w * header.Height / header.Width));
+
+			// ARGB32, so the budget bites sooner than on a compressed mip: 4096x2048 is exactly 32 MiB.
+			while (w > 1 && (long)w * h * 4 > TextureBudget)
+			{
+				w >>= 1;
+				h = Mathf.Max(1, (int)((long)w * header.Height / header.Width));
+			}
+
+			return (long)w * h * 4 * 2 < header.MipBytes(0);
+		}
+
 		private void loadMip(string path, string role, bool linear, int targetWidth, ref SCANddsHeader header, ref Texture tex, ref int loadedMip, ref bool failed)
 		{
 			if (header == null && !SCANddsHeader.TryRead(path, out header, out string error))
@@ -220,14 +252,24 @@ namespace SCANsat
 			// high magnification lands here, where the 1:1 mip is already the base level or close to it).
 			int mip = header.MipForWidth(targetWidth * 2);
 
-			if (header.MipBytes(mip) > 32L * 1048576 && header.MipForWidth(targetWidth) > mip)
+			if (header.MipBytes(mip) > TextureBudget && header.MipForWidth(targetWidth) > mip)
 			{
 				mip = header.MipForWidth(targetWidth);
 			}
 
-			if (tex != null && mip >= loadedMip)
+			// The width this call would end up holding: the mip's own, or - for a file with no mip
+			// chain, where a downscale replaces the base level - the downscale's.
+			bool downscale = downscaleSize(header, targetWidth, out int dsWidth, out int dsHeight);
+			int wantWidth = downscale ? dsWidth : header.MipWidth(mip);
+
+			// Only ever grow, and never shrink. The mip compare alone is not enough: a file with one
+			// level always picks mip 0, so once loaded every later call - however much wider the map
+			// asking - matched "mip >= loadedMip" and returned, and the GPU downscale stayed at whatever
+			// the first caller wanted (small map at 360 px -> 1024x512, and then the big map at 1440 and
+			// a 4096 export both composited from that).
+			if (tex != null && mip >= loadedMip && wantWidth <= tex.width)
 			{
-				return;   // already holding this mip or a larger one
+				return;   // already holding this mip or a larger one, at this width or wider
 			}
 
 			float start = Time.realtimeSinceStartup;
@@ -251,30 +293,25 @@ namespace SCANsat
 				Texture result = loaded;
 				string note = "";
 
-				if (header.MipCount == 1)
+				// No mip chain to choose from, so the only level is the full-size one (RSS ships most of
+				// its PluginData maps that way: 16K, one level, 128 MiB). When a GPU downscale that covers
+				// the request is clearly smaller, keep that instead and release the base level - the
+				// transient cost is the same, the resident cost drops from 128 MiB to 2.
+				if (downscale)
 				{
-					int w = Mathf.Min(header.Width, Mathf.NextPowerOfTwo(targetWidth * 2));   // same ~2 texels per pixel as the mip pick
-					int h = Mathf.Max(1, (int)((long)w * header.Height / header.Width));
-					long rtBytes = (long)w * h * 4;
+					long rtBytes = (long)dsWidth * dsHeight * 4;
 
-					// No mip chain to choose from, so the only level is the full-size one (RSS ships most of
-					// its PluginData maps that way: 16K, one level, 128 MiB). When a GPU downscale that covers
-					// the request is clearly smaller, keep that instead and release the base level - the
-					// transient cost is the same, the resident cost drops from 128 MiB to 2.
-					if (rtBytes * 2 < header.MipBytes(0))
-					{
-						RenderTexture rt = new RenderTexture(w, h, 0, RenderTextureFormat.ARGB32, linear ? RenderTextureReadWrite.Linear : RenderTextureReadWrite.sRGB);
-						rt.name = $"SCANsat {body.name} {role} downscale";
-						rt.wrapModeU = TextureWrapMode.Repeat;
-						rt.wrapModeV = TextureWrapMode.Clamp;
-						rt.filterMode = FilterMode.Bilinear;
-						rt.useMipMap = false;
-						rt.Create();
-						Graphics.Blit(loaded, rt);
-						UnityEngine.Object.Destroy(loaded);
-						result = rt;
-						note = $"; no mip chain, kept a {w}x{h} GPU downscale ({rtBytes / 1048576f:F1} MiB) and released the base level";
-					}
+					RenderTexture rt = new RenderTexture(dsWidth, dsHeight, 0, RenderTextureFormat.ARGB32, linear ? RenderTextureReadWrite.Linear : RenderTextureReadWrite.sRGB);
+					rt.name = $"SCANsat {body.name} {role} downscale";
+					rt.wrapModeU = TextureWrapMode.Repeat;
+					rt.wrapModeV = TextureWrapMode.Clamp;
+					rt.filterMode = FilterMode.Bilinear;
+					rt.useMipMap = false;
+					rt.Create();
+					Graphics.Blit(loaded, rt);
+					UnityEngine.Object.Destroy(loaded);
+					result = rt;
+					note = $"; no mip chain, kept a {dsWidth}x{dsHeight} GPU downscale ({rtBytes / 1048576f:F1} MiB) and released the base level";
 				}
 
 				if (tex != null)

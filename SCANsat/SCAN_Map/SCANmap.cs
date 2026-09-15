@@ -885,9 +885,15 @@ namespace SCANsat.SCAN_Map
 
 		/// <summary>
 		/// Visual mode's texture sources are per-body (SCANcontroller.mapTextureHandler): the
-		/// SCANSAT_BODY_TEXTURES paths and the GPU textures loaded from them. Register the body while
-		/// this map is in Visual mode and release it otherwise, so nothing is held for maps that never
-		/// show Visual.
+		/// SCANSAT_BODY_TEXTURES paths and the GPU textures loaded from them. Claim the body for this
+		/// map source the first time this map shows Visual, and hold that claim while the map stays on
+		/// the body - a mode toggle does NOT release it. Releasing on every non-Visual mode meant
+		/// Visual -> Altimetry -> Visual destroyed the body's textures and read them again, and for a
+		/// file with no mip chain (most RSS colour maps: 16384x8192 DXT5, one level) that is the whole
+		/// 128 MiB off disk, about 85 ms on the main thread, per toggle - twice, with the normal map.
+		/// The claim is released where the body really goes away: setBody on a body change, the window's
+		/// Close, this map's Destroy, and the controller's own scene teardown. Nothing is held for a map
+		/// that never shows Visual.
 		/// </summary>
 		private void refreshVisualMapTexture()
 		{
@@ -899,10 +905,6 @@ namespace SCANsat.SCAN_Map
 			if (mType == mapType.Visual)
 			{
 				SCANcontroller.controller.LoadVisualMapTexture_Renamed(body, mSource);
-			}
-			else
-			{
-				SCANcontroller.controller.UnloadVisualMapTexture(body, mSource);
 			}
 		}
 
