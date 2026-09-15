@@ -44,7 +44,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 		_HasSource ("Has Visual Source", Float) = 1
 		_HasElevation ("Has Elevation", Float) = 1
 		_OutputAlpha ("Output Alpha", Float) = 1
-		_ResGreyBlend ("Resource Below-Range Grey Blend", Float) = 0.3
+		_ResGreyBlend ("Resource Below-Range Or Empty Grey Blend", Float) = 0.3
 		// 0 = off, so an unset material (a DLL that never sets it) draws exactly as before.
 		_SensorMask ("Active Sensor Mask", Float) = 0
 	}
@@ -147,7 +147,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 			float _BaseNone;    // 1: no base layer at all, every pixel starts as _UnscannedColor (the resource-only planet overlay)
 			float _PlanetUV;    // 1: columns in the planet's ScaledSpace UV layout (u = 0 at 90 E, longitude decreasing) - the planet overlays
 			float _OutputAlpha; // final multiplier on the whole colour (the terrain planet overlay is 90 percent)
-			float _ResGreyBlend;   // resource overlay: blend toward grey for below-range cells (resourceToColor32's Transparency argument)
+			float _ResGreyBlend;   // resource overlay: blend toward grey for below-range or empty cells (resourceToColor32's Transparency argument)
 			float _NoData;      // 1: no terrain (Altimetry/Slope on a body without PQS) or no biome map (Biome): black-white static like the CPU renderers
 			float _NoiseSeed;   // re-rolled per pass by the C# side, so the static changes between passes rather than every frame
 
@@ -534,7 +534,10 @@ Shader "Hidden/SCANsat/VisualComposite"
 						float ab = tex2D(_ResourceTex, resUV).r * 100.0;   // stored as fraction, *100 -> percent
 						if (resLo && !resHi && ab > 0.0)
 							ab = floor(ab / 5.0) * 5.0 + 2.5;              // LoRes 5% buckets (a true zero stays zero, as resourceToColor32)
-						if (ab < _ResMinRange)
+						// resourceToColor32 zeroes a below-range abundance and only then tests Abundance == 0,
+						// so a scanned cell with nothing in it takes the "scanned, empty" grey blend whatever
+						// the range minimum is - including a minimum of 0, where ab < _ResMinRange never fires.
+						if (ab <= 0.0 || ab < _ResMinRange)
 							col = lerp(col, _GreyColor, _ResGreyBlend);
 						else
 						{
