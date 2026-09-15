@@ -1527,12 +1527,19 @@ namespace SCANsat.SCAN_Map
 				compositeMaterial.SetTexture("_BiomeLUT", biomeLUT);
 				compositeMaterial.SetFloat("_BiomeCount", biomeLUTCount);
 				compositeMaterial.SetFloat("_StockBiomes", stock ? 1f : 0f);
-				// elevation underlay: biome blends its colour with grey elevation by BiomeTransparency
+				// Elevation underlay: biome blends its colour with grey elevation by BiomeTransparency.
+				// _HasElevation 0 (no PQS, or a source that samples no elevation at all) leaves the underlay
+				// grey in the shader, which is what the CPU renderer did; the shader greys pixels with no
+				// altimetry coverage too. The range is the window-fitted one wherever the map fits its own
+				// (zoom map, RPM - their Altimetry already uses it), the body's terrain config otherwise.
 				compositeMaterial.SetTexture("_ElevationTex", elevationTex);
-				SCANterrainConfig tc = SCANUtil.getTerrainConfig(data);
-				float bRange = tc.MaxTerrain - tc.MinTerrain;
-				compositeMaterial.SetFloat("_TerrainMin", tc.MinTerrain);
-				compositeMaterial.SetFloat("_TerrainRange", bRange <= 0f ? 1f : bRange);
+				compositeMaterial.SetFloat("_HasElevation", (pqs && biomeUnderlay) ? 1f : 0f);
+				float bMin, bRange;
+				if (useCustomRange) { bMin = customMin; bRange = customRange; }
+				else { SCANterrainConfig tc = SCANUtil.getTerrainConfig(data); bMin = tc.MinTerrain; bRange = tc.MaxTerrain - tc.MinTerrain; }
+				if (bRange <= 0f) bRange = 1f;
+				compositeMaterial.SetFloat("_TerrainMin", bMin);
+				compositeMaterial.SetFloat("_TerrainRange", bRange);
 			}
 
 			bool resOn = resourceActive && SCANconfigLoader.GlobalResource && resource != null;

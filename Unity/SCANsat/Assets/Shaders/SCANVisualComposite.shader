@@ -42,6 +42,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 		_RowMin ("Row Min", Float) = 0
 		_RowMax ("Row Max", Float) = 1000000
 		_HasSource ("Has Visual Source", Float) = 1
+		_HasElevation ("Has Elevation", Float) = 1
 		_OutputAlpha ("Output Alpha", Float) = 1
 		_ResGreyBlend ("Resource Below-Range Grey Blend", Float) = 0.3
 	}
@@ -100,6 +101,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 			float _BiomeBorder;     // 1 draw white biome borders
 			float _StockBiomes;     // 1 use stock biome mapColors (_BiomeLUT), 0 low/high gradient
 			float _BiomeCount;      // number of biomes (for the _BiomeLUT index)
+			float _HasElevation;    // 1 when the body has terrain to sample for the underlay (the map's pqs flag); 0 keeps it grey
 
 			// Resource overlay
 			float _ResourceActive;  // 1 apply resource overlay on top of the base colour
@@ -454,8 +456,16 @@ Shader "Hidden/SCANsat/VisualComposite"
 						{
 							// stock mapColor (LUT by biome fraction) or low/high gradient, + grey elevation underlay
 							float4 g = _StockBiomes > 0.5 ? tex2D(_BiomeLUT, float2(bIdx + 0.5 / max(_BiomeCount, 1.0), 0.5)) : lerp(_LowBiomeColor, _HighBiomeColor, bIdx);
-							float belev = tex2D(_ElevationTex, elevUV).r;
-							float eg = _TerrainRange > 0.0 ? saturate((belev - _TerrainMin) / _TerrainRange) : 0.5;
+							// The underlay is palette.Grey (0.5) unless the body has terrain and this pixel's
+							// altimetry is scanned - what the CPU renderer did. An unsampled cell is 0 in the
+							// cache, so shading it anyway drags the biome colour toward black. Coverage test as
+							// in the Altimetry branch (SCANtype.Altimetry = LoRes | HiRes, "either").
+							float eg = 0.5;
+							if (_HasElevation > 0.5 && (covHas(cov, 0.0) || covHas(cov, 1.0)))
+							{
+								float belev = tex2D(_ElevationTex, elevUV).r;
+								eg = _TerrainRange > 0.0 ? saturate((belev - _TerrainMin) / _TerrainRange) : 0.5;
+							}
 							col = lerp(g, float4(eg, eg, eg, 1.0), _BiomeTransparency);
 							col.a = 1.0;
 						}
