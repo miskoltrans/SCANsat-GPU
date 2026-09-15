@@ -35,12 +35,17 @@ namespace SCANsat.SCAN_Map
 		public bool Compressed { get; private set; }
 		public int BlockBytes { get; private set; }     // per 4x4 block when compressed, else per pixel
 		public long DataOffset { get; private set; }    // first byte of mip 0
+		public long FileLength { get; private set; }    // what the mip ranges below have to fit inside
 		public string FormatName { get; private set; }
 
 		private const uint DDS_MAGIC = 0x20534444;      // "DDS "
 		private const uint DDPF_FOURCC = 0x4;
 		private const uint DDPF_RGB = 0x40;
 		private const uint DDPF_LUMINANCE = 0x20000;
+		private const uint DDSCAPS2_CUBEMAP = 0x200;    // dwCaps2, file offset 112
+		private const uint DDSCAPS2_VOLUME = 0x200000;
+		private const uint DDS_DIMENSION_TEXTURE2D = 3; // DX10 resourceDimension, file offset 132
+		private const uint DDS_MISC_TEXTURECUBE = 0x4;  // DX10 miscFlag, file offset 136
 
 		public static bool TryRead(string path, out SCANddsHeader header, out string error)
 		{
@@ -57,9 +62,11 @@ namespace SCANsat.SCAN_Map
 
 				byte[] h = new byte[148];
 				int read;
+				long fileLength;
 
 				using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
 				{
+					fileLength = fs.Length;
 					read = fs.Read(h, 0, h.Length);
 				}
 
@@ -74,6 +81,28 @@ namespace SCANsat.SCAN_Map
 				d.Width = (int)BitConverter.ToUInt32(h, 16);
 				d.MipCount = Math.Max(1, (int)BitConverter.ToUInt32(h, 28));
 				d.DataOffset = 128;
+				d.FileLength = fileLength;
+
+				// A cubemap, a volume or an array does not lay its data out as the one mip chain running
+				// from DataOffset that MipOffset walks: a cubemap repeats the chain per face, a volume
+				// stores dwDepth slices per level, an array repeats it per slice. Every offset computed
+				// below would land in the middle of the wrong face or slice, so say so instead of
+				// handing the loader a plausible-looking byte range. dwDepth is 0 on a plain 2D file
+				// and 1 on one written with DDSD_DEPTH, so only more than one slice is a volume.
+				uint depth = BitConverter.ToUInt32(h, 24);
+				uint caps2 = BitConverter.ToUInt32(h, 112);
+
+				if ((caps2 & DDSCAPS2_CUBEMAP) != 0)
+				{
+					error = "cubemap DDS files are not supported";
+					return false;
+				}
+
+				if ((caps2 & DDSCAPS2_VOLUME) != 0 || depth > 1)
+				{
+					error = "volume DDS files are not supported (depth " + depth + ")";
+					return false;
+				}
 
 				uint pfFlags = BitConverter.ToUInt32(h, 80);
 				string fourCC = Encoding.ASCII.GetString(h, 84, 4);
@@ -91,7 +120,30 @@ namespace SCANsat.SCAN_Map
 					}
 
 					uint dxgi = BitConverter.ToUInt32(h, 128);
+					uint dimension = BitConverter.ToUInt32(h, 132);
+					uint miscFlag = BitConverter.ToUInt32(h, 136);
+					uint arraySize = BitConverter.ToUInt32(h, 140);
 					d.DataOffset = 148;
+
+					// The DX10 header carries its own say on all three, and the legacy dwCaps2 of such a
+					// file is usually 0 whatever it holds.
+					if (dimension != DDS_DIMENSION_TEXTURE2D)
+					{
+						error = "DX10 resource dimension " + dimension + " is not a 2D texture";
+						return false;
+					}
+
+					if ((miscFlag & DDS_MISC_TEXTURECUBE) != 0)
+					{
+						error = "cubemap DDS files are not supported";
+						return false;
+					}
+
+					if (arraySize > 1)
+					{
+						error = "texture array DDS files are not supported (" + arraySize + " slices)";
+						return false;
+					}
 
 					if (!d.setDxgi(dxgi))
 					{
@@ -140,6 +192,18 @@ namespace SCANsat.SCAN_Map
 				if (d.Width <= 0 || d.Height <= 0)
 				{
 					error = "bad dimensions " + d.Width + "x" + d.Height;
+					return false;
+				}
+
+				// A file too short for its own base level is unusable whichever level is asked for.
+				// Levels further down the chain are checked one at a time by TryMipRange, so a file
+				// missing only its tail still serves the levels it does hold.
+				long needed = d.DataOffset + d.MipBytes(0);
+
+				if (d.FileLength < needed)
+				{
+					error = "file is " + d.FileLength + " bytes, short of the " + needed + " a "
+						+ d.Width + "x" + d.Height + " " + d.FormatName + " level 0 needs";
 					return false;
 				}
 
@@ -231,6 +295,37 @@ namespace SCANsat.SCAN_Map
 			}
 
 			return offset;
+		}
+
+		/// <summary>
+		/// The byte range of one mip level, checked against the file's actual length. dwMipMapCount is
+		/// the file's own claim and nothing verifies that the data behind it was written, so a truncated
+		/// or lying file is caught here rather than by handing the loader a range past the end.
+		/// </summary>
+		public bool TryMipRange(int mip, out long offset, out long length, out string error)
+		{
+			offset = 0;
+			length = 0;
+			error = null;
+
+			if (mip < 0 || mip >= MipCount)
+			{
+				error = "mip " + mip + " is outside the file's " + MipCount + " level(s)";
+				return false;
+			}
+
+			offset = MipOffset(mip);
+			length = MipBytes(mip);
+
+			if (offset + length > FileLength)
+			{
+				error = "mip " + mip + " (" + MipWidth(mip) + "x" + MipHeight(mip) + " " + FormatName
+					+ ") needs bytes " + offset + " to " + (offset + length) + ", past the end of a "
+					+ FileLength + " byte file";
+				return false;
+			}
+
+			return true;
 		}
 
 		/// <summary>Smallest mip (largest index) whose width still covers targetWidth.</summary>

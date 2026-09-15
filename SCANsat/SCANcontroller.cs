@@ -297,12 +297,21 @@ namespace SCANsat
 				return;   // already holding this mip or a larger one, at this width or wider
 			}
 
+			// The mip chain is the file's own claim; nothing guarantees the bytes behind it were
+			// written. Check the range against the file's length before asking the loader to read it.
+			if (!header.TryMipRange(mip, out long mipOffset, out long mipBytes, out string rangeError))
+			{
+				failed = true;
+				Log.Error($"[{body.name}] {role} {path}: {rangeError}");
+				return;
+			}
+
 			float start = Time.realtimeSinceStartup;
 
 			try
 			{
 				Texture2DConfig config = header.ConfigForMip(mip, linear);
-				TextureLoadTask<Texture2D> task = TextureLoader.LoadOwnedTexture2D(config, path, header.MipOffset(mip), header.MipBytes(mip));
+				TextureLoadTask<Texture2D> task = TextureLoader.LoadOwnedTexture2D(config, path, mipOffset, mipBytes);
 				Texture2D loaded = task.GetTexture();
 
 				if (loaded == null)
@@ -349,7 +358,7 @@ namespace SCANsat
 
 				SCANUtil.SCANlog("[{0}] {1}: mip {2}/{3} ({4}x{5} {6}, {7:F1} MiB at offset {8}) for target width {9}px in {10:F0} ms{11}",
 					body.name, role, mip, header.MipCount, config.Width, config.Height, header.FormatName,
-					header.MipBytes(mip) / 1048576f, header.MipOffset(mip), targetWidth, (Time.realtimeSinceStartup - start) * 1000f, note);
+					mipBytes / 1048576f, mipOffset, targetWidth, (Time.realtimeSinceStartup - start) * 1000f, note);
 			}
 			catch (Exception e)
 			{
