@@ -675,7 +675,7 @@ namespace SCANsat.SCAN_Map
 				return;
 			}
 
-			// baseNone: the resource-only planet overlay, whose build buildGpuDataFrame short-circuits.
+			// baseNone: the resource-only planet overlay, which resetMap leaves with nothing to build.
 			bool wantElev = !baseNone && pqs
 				&& (mType == mapType.Altimetry || mType == mapType.Slope || (mType == mapType.Biome && profile.BiomeUnderlay));
 			bool wantBiome = !baseNone && biomeMap && mType == mapType.Biome;
@@ -708,7 +708,6 @@ namespace SCANsat.SCAN_Map
 			gpuDataComplete = false;
 			gpuDataHash = 0;
 			gpuRendered = false;
-			gpuSweepDone = false;
 			gpuRecolorSweep = false;
 			resourceTexReady = false;
 			resourceCacheReady = false;
@@ -826,8 +825,7 @@ namespace SCANsat.SCAN_Map
 		private Texture2D coverageFlags;
 		private Color32[] coverageFlagsBuf;   // reused CPU buffer for coverageFlags (no per-frame alloc)
 		private bool coverageFlagsDirty = true;   // set each resetMap; rebuild the coverage texture once per pass, not per sweep row
-		private bool gpuRendered;
-		private bool noRenderLogged;   // one "not rendered" log per pass when no renderer applies (shader unavailable)
+		private bool gpuRendered;      // the render target exists at the map's size and DisplayTexture hands it out
 			// GPU data textures for the non-Visual modes (all-modes port). Elevation/biome/resource
 			// upload from the CPU caches (big_heightmap / biome_indexmap / resourceCache); a 1-D palette
 			// LUT baked from heightToColor colourizes altimetry (legend parity). Shader branches _MapMode.
@@ -862,9 +860,9 @@ namespace SCANsat.SCAN_Map
 		// recolour re-sweep have their end state on the first Blit, so their line is paced by wall-clock
 		// time (the scanline setting) rather than by pump calls: a pass takes the same time on any map
 		// size, frame rate or map generation budget. The data modes build row by row, so their line tracks
-		// mapstep instead. gpuSweepDone gates isMapComplete so the pump keeps re-compositing until the
+		// mapstep instead. passComplete gates isMapComplete so the pump keeps re-compositing until the
 		// reveal finishes.
-		private bool gpuSweepDone;
+		private bool passComplete = true;   // the fully revealed composite happened, or nothing renders this map; true until a reset starts a pass, so an unsized map is never pumped
 		private float sweepStart = -1f;   // realtimeSinceStartup at this pass's first composite; -1 until then
 		private float sweepDuration = BaseSweepDuration;   // this pass's sweep length; taken when its clock starts
 		private const float BaseSweepDuration = 1f;        // the sweep at 1x - the scanline setting scales this
@@ -963,20 +961,17 @@ namespace SCANsat.SCAN_Map
 			customResourceMax = rMax;
 		}
 
+		// A pass holds "incomplete" until its cosmetic sweep finishes, so the pump keeps re-compositing
+		// the advancing scanline; a map nothing renders completes on its first pump.
 		internal bool isMapComplete()
 		{
-			// Composited maps hold "incomplete" until the cosmetic sweep finishes so the pump keeps
-			// re-compositing the advancing scanline. Before the first composite of a pass (or when
-			// nothing renders this map) mapstep says whether the pass is over.
-			return gpuRendered ? gpuSweepDone : mapstep >= mapheight;
+			return passComplete;
 		}
 
 		public void resetMap(bool resourceOn, bool setRes = true)
 		{
-			mapstep = 0;   // rows built this pass
-			gpuRendered = false;
-			gpuSweepDone = false;
-			gpuRecolorSweep = false;   // a recolour in flight ends here; the shortcut below decides afresh. Left set, a mode switch mid-sweep re-Blit the new mode from textures never built for it.
+			passComplete = false;
+			gpuRecolorSweep = false;   // a recolour in flight ends here; the decision below is made afresh. Left set, a mode switch mid-sweep re-Blit the new mode from textures never built for it.
 			sweepStart = -1f;
 			rangeRow = -1;
 			noiseSeed = UnityEngine.Random.value;
@@ -988,7 +983,6 @@ namespace SCANsat.SCAN_Map
 			resourceTexReady = false;
 			resourceCacheReady = false;
 			coverageFlagsDirty = true;   // new pass: refresh the GPU coverage stencil once from live coverage
-			noRenderLogged = false;
 			resourceActive = resourceOn;
 			heightGridPass = profile.HeightGrid && data != null && data.Built && mapwidth == 360 && mapheight == 180 && projection == MapProjection.Rectangular;
 			ensureModeCaches();   // this pass's caches, and only this pass's
@@ -1025,13 +1019,16 @@ namespace SCANsat.SCAN_Map
 			// here, so this covers map-type switches that don't go through setBody.
 			refreshVisualMapTexture();
 
-			// Instant re-colour: if the GPU data cache is already fully sampled for this exact config
-			// (a colourisation-only change - palette/clamp/terminator - leaves the config hash the same),
-			// skip the re-sweep. Jump to the last row so the next getPartialMap re-Blits once with the
-			// rebuilt LUT over the cached data textures instead of re-sampling PQS across the whole map.
+			// What this pass has to build. Visual has nothing: its end state is one composite of the body's
+			// textures. A body without PQS or without a biome map has nothing either (the shader draws
+			// its static), nor has the resource-only overlay (the composite builds its cache lazily). A
+			// data mode whose cache is already fully sampled for this exact config - a colourisation-only
+			// change (palette, clamp, terminator) leaves the config hash the same - re-Blits the cached
+			// data with the rebuilt LUT under a new sweep, no re-sample. Everything else builds from row 0.
+			mapstep = mapheight;
 			bool dataMode = mType == mapType.Altimetry || mType == mapType.Slope || mType == mapType.Biome;
 
-			if (dataMode && willRenderGPU(mType))
+			if (dataMode && !gpuNoData() && !baseNone && willRenderGPU(mType))
 			{
 				// The config hash includes a coverage checksum. A cell scanned after its row was sampled
 				// is in the next pass's stencil but not in the data (it uploads as 0 m and draws black),
@@ -1046,19 +1043,17 @@ namespace SCANsat.SCAN_Map
 				// buildResourceCache finds the grid it already has.
 				if (gpuDataComplete && gpuDataHash == configHash)
 				{
-					mapstep = 0;               // replay the sweep from the top...
-					gpuRendered = true;
-					gpuSweepDone = false;
-					gpuRecolorSweep = true;    // ...re-Blitting the cached data with the rebuilt LUT (charm, no re-sample)
+					gpuRecolorSweep = true;    // gpuDataHash stays the build's: a recolour adds no samples, so it must not claim coverage that arrived during it
 					resourceTexReady = false;  // resource colours may have changed too
 				}
 				else
 				{
 					// A full data build starts now and overwrites the data textures row by row. Until it
-					// completes (buildGpuDataFrame sets the flag again) they hold a mix of passes, so a
-					// reset in the meantime must not take the shortcut above.
+					// completes (buildSlice sets the flag again) they hold a mix of passes, so a reset in
+					// the meantime must not take the shortcut above.
 					gpuDataComplete = false;
 					pendingDataHash = configHash;
+					mapstep = 0;
 				}
 			}
 		}
@@ -1149,22 +1144,14 @@ namespace SCANsat.SCAN_Map
 			}
 		}
 
-		// Renders the Visual map on the GPU from the body's Visual source (cfg-declared files at a
-		// fitting mip, or its resident ScaledSpace textures) - no readable CPU copy anywhere. Returns false (CPU
-		// fallback) when not eligible - see willRenderGPU.
-		private bool tryRenderGPU()
+		// The render target, at the map's size, filled with the map background when created - as the CPU
+		// path filled a fresh Texture2D. Creation and resize only: a pass overwrites rows under the
+		// scanline and leaves the rest standing (the shader discards ahead of the sweep), which is how
+		// every map behaved on the CPU. First thing in every pump, so DisplayTexture already hands the
+		// target out on the frame the window consumes it - the first composite may be frames away (a
+		// cold build, the range pre-pass) and the window is only re-pointed when its updateMap flag says.
+		private void ensureRenderTex()
 		{
-			if (!willRenderGPU(mType))
-				return false;
-
-			Shader shader = SCAN_UI_Loader.VisualCompositeShader;
-
-			// (source material / useMaterial flag are for a later gas-giant/Parallax pass)
-			SCANcontroller.controller.getVisualSource(body, visualTargetWidth(), out Texture colorTex, out Texture normalTex, out int normalYChannel, out _);
-
-			if (compositeMaterial == null || compositeMaterial.shader != shader)
-				compositeMaterial = new Material(shader);
-
 			if (visualRenderTex == null || visualRenderTex.width != mapwidth || visualRenderTex.height != mapheight)
 			{
 				if (visualRenderTex != null)
@@ -1177,8 +1164,34 @@ namespace SCANsat.SCAN_Map
 
 				visualRenderTex = new RenderTexture(mapwidth, mapheight, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
 				visualRenderTex.wrapMode = TextureWrapMode.Clamp;
-				clearGpuRenderTex();   // rows ahead of the sweep show whatever the RT holds, so start it on background
+
+				RenderTexture prev = RenderTexture.active;
+				RenderTexture.active = visualRenderTex;
+				Color bg = SCAN_Settings_Config.Instance.MapBackgroundColor;
+				bg.a *= SCAN_Settings_Config.Instance.BackgroundTransparency;
+				GL.Clear(false, true, bg);
+				RenderTexture.active = prev;
 			}
+
+			gpuRendered = true;
+		}
+
+		// One composite of this map into its render target: every uniform from the map's current state,
+		// the mode's data textures and LUTs (setModeUniforms), and the reveal. Rows ahead of the line
+		// keep the previous pass (shader discard), the frontier is the redline. The line is paced by
+		// wall-clock time (timedSweepFraction) but never runs ahead of the rows built: Visual and a
+		// recolour have their end state at once (resetMap left nothing to build), so they always get
+		// the full timed sweep; a data pass shows the line at the real sampling pace when that is
+		// slower. The fully revealed composite completes the pass.
+		private void composite()
+		{
+			Shader shader = SCAN_UI_Loader.VisualCompositeShader;
+
+			// (source material / useMaterial flag are for a later gas-giant/Parallax pass)
+			SCANcontroller.controller.getVisualSource(body, visualTargetWidth(), out Texture colorTex, out Texture normalTex, out int normalYChannel, out _);
+
+			if (compositeMaterial == null || compositeMaterial.shader != shader)
+				compositeMaterial = new Material(shader);
 
 			updateCoverageFlags();
 
@@ -1246,34 +1259,20 @@ namespace SCANsat.SCAN_Map
 				compositeMaterial.SetFloat("_MapMode", (float)(int)mType);
 				setModeUniforms();
 
-			// Cosmetic reveal fraction. Re-compositing each frame with a new fraction animates the
-			// RawImage - already pointed at visualRenderTex - in place. Rows ahead of the line keep the
-			// previous pass (shader discard); the RT was filled with the background only when created,
-			// like the CPU path's fresh Texture2D. Redline = palette.Red.
-			// The line is paced by time (the scanline setting) but never runs ahead of the rows built: Visual
-			// and the recolour re-sweep have their end state at once, so they always get the full timed sweep;
-			// a data pass (buildGpuDataFrame) is clamped to mapstep / mapheight, so a warm cache sweeps in the
-			// set time and a cold one shows the line at the real sampling pace, however fast the setting is.
+			// Re-compositing each frame with a new reveal fraction animates the RawImage - already pointed
+			// at visualRenderTex - in place. A source without a sweep (the planet overlay) composites once,
+			// fully revealed, when its build is done.
 			float reveal = 1f;
-			if (mapheight > 0)
-			{
-				reveal = profile.Sweep ? timedSweepFraction() : 1f;
-				if (mType != mapType.Visual && !gpuRecolorSweep)
-					reveal = Mathf.Min(reveal, Mathf.Clamp01(mapstep / (float)mapheight));
-			}
+			if (profile.Sweep && mapheight > 0)
+				reveal = Mathf.Min(timedSweepFraction(), Mathf.Clamp01(mapstep / (float)mapheight));
 
 			compositeMaterial.SetColor("_RedlineColor", palette.Red);
 			compositeMaterial.SetFloat("_SweepY", reveal);
 
 			Graphics.Blit(null, visualRenderTex, compositeMaterial);
 
-			gpuRendered = true;                       // DisplayTexture returns the RT during the sweep
 			if (reveal >= 1f)
-			{
-				gpuSweepDone = true;                  // that Blit was the fully revealed one (no redline)
-				mapstep = mapheight;                  // mark complete for the legacy mapstep-based checks
-			}
-			return true;
+				passComplete = true;   // that Blit was the fully revealed one (no redline)
 		}
 
 		// The big map's graticule as a texture for the UI's grid layer, which sits above the map with
@@ -1478,7 +1477,7 @@ namespace SCANsat.SCAN_Map
 			rt.Create();
 
 			// Same window, k times the pixels: scale the size and the pixels-per-degree together. Every
-			// other uniform is still set from the last on-screen render; the next tryRenderGPU resets
+			// other uniform is still set from the last on-screen render; the next composite resets
 			// all of them, so nothing here needs restoring.
 			compositeMaterial.SetTexture("_ScaledColor", colorTex);
 			compositeMaterial.SetTexture("_ScaledNormal", normalTex);
@@ -1492,43 +1491,7 @@ namespace SCANsat.SCAN_Map
 			return rt;
 		}
 
-		// Uploads the coverage bitmask as a 360x180 texture the composite shader samples as a
-		// per-pixel stencil: R=VisualHiRes, G=VisualLoRes, B=ResourceHiRes, A=ResourceLoRes.
-		// GPU mode data helpers:
-
-		// Create the GPU RenderTexture (cleared to background) + set gpuRendered so DisplayTexture
-		// returns it immediately - before tryRenderGPU has real data. Fixes the updateMap timing for
-		// non-Visual modes: their tryRenderGPU runs in the getPartialMap branch (after the prep loop),
-		// which is AFTER the BigMap pump consumes updateMap on the mode-switch frame, so without this
-		// the RawImage stays pointed at the never-painted CPU map texture and shows blank. (Visual
-		// primes via its own tryRenderGPU at the top of getPartialMap.)
-		private void primeGpuRenderTex()
-		{
-			if (visualRenderTex == null || visualRenderTex.width != mapwidth || visualRenderTex.height != mapheight)
-			{
-				if (visualRenderTex != null) { visualRenderTex.Release(); UnityEngine.Object.Destroy(visualRenderTex); }
-				visualRenderTex = new RenderTexture(mapwidth, mapheight, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
-				visualRenderTex.wrapMode = TextureWrapMode.Clamp;
-				clearGpuRenderTex();
-			}
-			gpuRendered = true;
-		}
-
-		// Fill the RenderTexture with the map background, as the CPU path fills a freshly created
-		// Texture2D. Creation and resize only: a pass overwrites rows under the scanline and leaves
-		// the rest standing (the shader discards ahead of the sweep), which is how every map behaved
-		// on the CPU - nothing is cleared before scanning.
-		private void clearGpuRenderTex()
-		{
-			RenderTexture prev = RenderTexture.active;
-			RenderTexture.active = visualRenderTex;
-			Color bg = SCAN_Settings_Config.Instance.MapBackgroundColor;
-			bg.a *= SCAN_Settings_Config.Instance.BackgroundTransparency;
-			GL.Clear(false, true, bg);
-			RenderTexture.active = prev;
-		}
-
-		// Per-mode data textures + uniforms for tryRenderGPU. Visual's ScaledSpace textures are set by
+		// Per-mode data textures + uniforms for composite. Visual's ScaledSpace textures are set by
 		// the caller; here we upload the CPU-cache data for Altimetry/Slope/Biome + the resource overlay.
 		private void setModeUniforms()
 		{
@@ -1695,7 +1658,7 @@ namespace SCANsat.SCAN_Map
 		}
 
 		// Ensure the mode's R-float data texture exists (cleared to 0). Rows are then staged by
-		// stageDataRow as the prep fills the cache and uploaded once per frame (buildGpuDataFrame).
+		// stageDataRow as the prep fills the cache and uploaded once per frame (buildSlice).
 		// A new Texture2D's contents are undefined, so the fresh texture is zeroed through its own raw
 		// CPU buffer - GetRawTextureData<float> is a view over storage Unity has already allocated, not
 		// a copy. The full-size Color[] mirror this replaced cost 16 bytes a pixel, 16 MB standing per
@@ -1880,7 +1843,7 @@ namespace SCANsat.SCAN_Map
 
 			// Coverage only changes between render passes (resetMap sets coverageFlagsDirty), never
 			// within the per-row sweep - so rebuild + GPU-upload once per pass instead of on every
-			// tryRenderGPU call. The CPU buffer is a reused member, so the sweep allocates nothing.
+			// composite. The CPU buffer is a reused member, so the sweep allocates nothing.
 			if (!created && !coverageFlagsDirty)
 				return;
 
@@ -2124,7 +2087,7 @@ namespace SCANsat.SCAN_Map
 
 		// Composite this map once more at w x h into a fresh RenderTexture (the caller releases it). The
 		// planet overlay renders its geographic data at the overlay's own size this way. Every other
-		// uniform is the last composite's; the next tryRenderGPU resets them all.
+		// uniform is the last composite's; the next composite resets them all.
 		internal RenderTexture renderAt(int w, int h)
 		{
 			if (!gpuRendered || compositeMaterial == null || mapwidth <= 0)
@@ -2192,7 +2155,7 @@ namespace SCANsat.SCAN_Map
 		}
 
 		// The CPU sampling for one map row: elevation into big_heightmap where the cache has none, and in
-		// Biome mode the biome index into biomeIndex. buildGpuDataFrame stages the results into the data
+		// Biome mode the biome index into biomeIndex. buildSlice stages the results into the data
 		// textures; the shader does all the colourising, and reads its own neighbouring texels for the
 		// slope and the biome borders, so no row needs another row sampled first.
 		private void prepRow(int row)
@@ -2275,30 +2238,23 @@ namespace SCANsat.SCAN_Map
 			}
 		}
 
-		// GPU data modes (Altimetry / Slope / Biome on the cache=true big map). Builds the pass under a
-		// per-frame CPU budget instead of one row per pump call, stages the rows into the data textures
-		// and uploads each texture once, then composites once. tryRenderGPU keeps the reveal at the
-		// smaller of the timed sweep and the rows built, so a warm cache sweeps in the set time and a
-		// cold one shows the line at the real sampling pace. The resource cache is not built here: the
+		// One frame's slice of a data pass (Altimetry / Slope / Biome): rows sampled under the per-frame
+		// CPU budget shared by every building map, staged into the data textures, each texture uploaded
+		// once. Only called with rows left to build. Returns false while the auto-range pre-pass is
+		// still running, when there is nothing to show yet. The resource cache is not built here: the
 		// first composite builds it lazily (setModeUniforms -> buildResourceCache), as for Visual.
-		private void buildGpuDataFrame()
+		private bool buildSlice()
 		{
 			long start = System.Diagnostics.Stopwatch.GetTimestamp();
 			long budget = claimBuildBudget();
-			bool elevDirty = false, biomeDirty = false, builtNow = false;
-
-			if ((gpuNoData() || baseNone) && mapstep < mapheight)
-				mapstep = mapheight;   // nothing to build: the shader draws static, or only the resource layer (its cache is built lazily by the composite)
+			bool elevDirty = false, biomeDirty = false;
 
 			if (biomeRowCached == null || biomeRowCached.Length != mapheight)
 				biomeRowCached = new bool[mapheight];
 
-			if (mapstep < mapheight)
-			{
-				if (passBuildStart < 0f)
-					passBuildStart = Time.realtimeSinceStartup;
-				passBuildFrames++;
-			}
+			if (passBuildStart < 0f)
+				passBuildStart = Time.realtimeSinceStartup;
+			passBuildFrames++;
 
 			// Auto range (zoom map, RPM): before any row is built or revealed, sample every 4th pixel of
 			// the window into the cache and fit the palette range to what is there - what the windows'
@@ -2323,7 +2279,7 @@ namespace SCANsat.SCAN_Map
 				if (rangeRow < mapheight)
 				{
 					reportBuildBudgetUsed(System.Diagnostics.Stopwatch.GetTimestamp() - start);
-					return;   // nothing to show yet; the RenderTexture keeps the previous pass
+					return false;
 				}
 			}
 
@@ -2359,10 +2315,7 @@ namespace SCANsat.SCAN_Map
 
 				mapstep++;
 				if (mapstep >= mapheight)
-				{
-					builtNow = true;
 					break;
-				}
 				if (System.Diagnostics.Stopwatch.GetTimestamp() - start >= budget)
 					break;
 			}
@@ -2372,30 +2325,21 @@ namespace SCANsat.SCAN_Map
 
 			reportBuildBudgetUsed(System.Diagnostics.Stopwatch.GetTimestamp() - start);
 
-			if (builtNow)
+			if (mapstep >= mapheight)
 			{
 				gpuDataComplete = true;          // data cache fully sampled...
 				gpuDataHash = pendingDataHash;    // ...for the coverage this build started from (see resetMap)
 				passBuildMs = (Time.realtimeSinceStartup - passBuildStart) * 1000f;
 			}
 
-			// Without the cosmetic sweep (planet overlay) nothing is shown mid-build: composite once when done.
-			if (!profile.Sweep && mapstep < mapheight)
-				return;
-
-			tryRenderGPU();   // reveal = min(timed sweep, mapstep / mapheight); sets gpuSweepDone at 1
-
-			if (gpuSweepDone && passBuildStart >= 0f)
-			{
-				SCANUtil.SCANlog("[{0}] {1} GPU pass {2}x{3}: build {4} frames / {5:F0} ms ({6} height samples, {7} biome lookups), pass total {8:F2} s",
-					body.bodyName, mType, mapwidth, mapheight, passBuildFrames, passBuildMs, passHeightSamples, passBiomeSamples, Time.realtimeSinceStartup - passBuildStart);
-				passBuildStart = -1f;   // one line per pass
-			}
+			return true;
 		}
 
-		/* MAP: build: one pump call per frame while !isMapComplete. Each call does one frame's worth of
-		   work: a slice of the data build under the shared CPU budget, one composite, and the sweep
-		   advances by wall-clock time (tryRenderGPU). */
+		/* MAP: build: one pump call per frame while !isMapComplete. Every pass is the same sequence,
+		   whatever the mode or the source: make sure the render target exists, build a slice of the
+		   data under the shared CPU budget (nothing at all for Visual, a recolour or a body with no
+		   data - resetMap left those with no rows to build), then composite once with the reveal at
+		   the smaller of the timed sweep and the rows built. */
 		internal void getPartialMap()
 		{
 			if (data == null)
@@ -2403,56 +2347,51 @@ namespace SCANsat.SCAN_Map
 				return;
 			}
 
-			if (mType == mapType.Visual && willRenderGPU(mapType.Visual))
+			if (!willRenderGPU(mType))
 			{
-				tryRenderGPU();
-				return;
-			}
-
-			// Non-Visual GPU modes: point DisplayTexture at the RenderTexture up-front so the RawImage
-			// tracks the GPU output on the same frame the UI consumes updateMap (the real data render
-			// happens in buildGpuDataFrame, on the apply call, after the prep fills the caches).
-			if (mType != mapType.Visual && !gpuRendered && willRenderGPU(mType))
-				primeGpuRenderTex();
-
-			// Cosmetic re-sweep after a colour-only change: the data textures are already uploaded, so
-			// skip the whole prep/CPU loop and just re-Blit once per frame with the rebuilt LUT while the
-			// timed reveal advances - keeps the sweep charm with no PQS re-sample and no re-processing.
-			if (gpuRecolorSweep)
-			{
-				tryRenderGPU();   // sets gpuSweepDone on the fully revealed Blit
-				if (gpuSweepDone)
+				// Nothing renders this map: the composite shader is missing or unsupported on this graphics
+				// device (SCAN_UI_Loader logged which), or Visual maps are disabled in the settings. There is
+				// no CPU renderer any more, so the pass is over, said once per pass, and DisplayTexture
+				// stays null.
+				if (!passComplete)
 				{
-					// gpuDataHash stays the build's: a recolour adds no samples, so it must not claim
-					// coverage that arrived during it.
-					gpuRecolorSweep = false;
-					gpuDataComplete = true;
-					SCANUtil.SCANlog("[{0}] {1} GPU recolour pass {2}x{3}: no re-sample, sweep {4:F2} s", body.bodyName, mType, mapwidth, mapheight, Time.realtimeSinceStartup - sweepStart);
-				}
-				return;
-			}
-
-			// GPU data modes (Altimetry / Slope / Biome): budgeted build plus one composite per frame.
-			if (mType != mapType.Visual && willRenderGPU(mType))
-			{
-				buildGpuDataFrame();
-				return;
-			}
-
-			// Nothing renders this map: the composite shader is missing or unsupported on this graphics
-			// device (SCAN_UI_Loader logged which), or Visual maps are disabled in the settings. There is
-			// no CPU renderer any more, so mark the pass complete, say so once per pass, and leave
-			// DisplayTexture null.
-			if (mapstep < mapheight)
-			{
-				mapstep = mapheight;
-
-				if (!noRenderLogged)
-				{
-					noRenderLogged = true;
+					passComplete = true;
 					SCANUtil.SCANlog("[{0}] {1} map not rendered: composite shader unavailable{2}", body.bodyName, mType,
 						mType == mapType.Visual && !SCAN_Settings_Config.Instance.VisibleMapsActive ? " (or Visual maps disabled)" : "");
 				}
+
+				return;
+			}
+
+			ensureRenderTex();
+
+			if (mapstep < mapheight && !buildSlice())
+			{
+				return;   // the auto-range pre-pass is still running: nothing to show yet, the target keeps the previous pass
+			}
+
+			if (!profile.Sweep && mapstep < mapheight)
+			{
+				return;   // no reveal (the planet overlay): nothing is shown mid-build, one composite when it is done
+			}
+
+			composite();
+
+			if (!passComplete)
+			{
+				return;
+			}
+
+			if (gpuRecolorSweep)
+			{
+				gpuRecolorSweep = false;
+				SCANUtil.SCANlog("[{0}] {1} GPU recolour pass {2}x{3}: no re-sample, sweep {4:F2} s", body.bodyName, mType, mapwidth, mapheight, Time.realtimeSinceStartup - sweepStart);
+			}
+			else if (passBuildStart >= 0f)
+			{
+				SCANUtil.SCANlog("[{0}] {1} GPU pass {2}x{3}: build {4} frames / {5:F0} ms ({6} height samples, {7} biome lookups), pass total {8:F2} s",
+					body.bodyName, mType, mapwidth, mapheight, passBuildFrames, passBuildMs, passHeightSamples, passBiomeSamples, Time.realtimeSinceStartup - passBuildStart);
+				passBuildStart = -1f;   // one line per pass
 			}
 		}
 
