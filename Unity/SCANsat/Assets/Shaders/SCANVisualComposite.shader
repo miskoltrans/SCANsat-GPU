@@ -17,8 +17,8 @@
 // after any change here; the C# side sets every uniform below each frame, and a uniform the loaded
 // bundle does not know is silently ignored, so DLL and bundle can be updated independently.
 // Data-texture ORIENTATION (the geo UV mappings below) is the main thing to verify in-game - if a
-// mode is mirrored/flipped, adjust the geoUV / elevUV / resUV construction (same class of fix as
-// Visual's `fLon = 1 - fLon`).
+// mode is mirrored/flipped, adjust geoUVOf / dataUVAt (same class of fix as Visual's
+// `fLon = 1 - fLon`).
 Shader "Hidden/SCANsat/VisualComposite"
 {
 	Properties
@@ -64,9 +64,9 @@ Shader "Hidden/SCANsat/VisualComposite"
 			sampler2D _ScaledColor;
 			sampler2D _ScaledNormal;
 			sampler2D _CoverageFlags;   // 360x180, point-sampled. R=low byte, G=high byte of SCANdata.coverage Int16
-			sampler2D _ElevationTex;    // mapW x mapH, R = raw elevation (metres); from big_heightmap. Geographic for the big map, pixel space for window maps (_ElevPixelSpace)
-			sampler2D _BiomeIndexTex;   // mapW x mapH, R = biome index fraction [0,1]; always pixel space (filled per rendered pixel)
-			sampler2D _ResourceTex;     // resW x resH, R = abundance fraction [0,1]; from resourceCache. Geographic or pixel space (_ResPixelSpace)
+			sampler2D _ElevationTex;    // mapW x mapH, R = raw elevation (metres); from big_heightmap. Addressed per _PixelSpace
+			sampler2D _BiomeIndexTex;   // mapW x mapH, R = biome index fraction [0,1]; from biome_indexmap. Addressed per _PixelSpace
+			sampler2D _ResourceTex;     // resW x resH, R = abundance fraction [0,1]; from resourceCache. Addressed per _PixelSpace
 			sampler2D _PaletteLUT;      // 1-D (Nx1) elevation colour ramp baked from heightToColor (colour)
 			sampler2D _PaletteGreyLUT;  // 1-D grey ramp for LoRes-only altimetry (nowColor=false)
 			sampler2D _BiomeLUT;        // 1-D (biomeCount x1) stock biome mapColors, indexed by biome fraction
@@ -129,12 +129,13 @@ Shader "Hidden/SCANsat/VisualComposite"
 			float _SweepBand;              // redline thickness in rows
 			float4 _RedlineColor;          // the advancing scanline colour
 
-			// Data-texture addressing. The big map's elevation cache is geographic (it survives projection
-			// changes); a window map (zoom map, RPM) fills its cache per rendered pixel, so it is read at
-			// the pixel uv. The resource cache is pixel space whenever it was generated over the map's raw
-			// window (Orthographic, or any window map), geographic otherwise.
-			float _ElevPixelSpace;   // 1: read _ElevationTex at the pixel uv instead of geoUV
-			float _ResPixelSpace;    // 1: read _ResourceTex at the pixel uv instead of geoUV
+			// Data-texture addressing, one rule for the three data textures (elevation, biome index,
+			// resource): 0 = geographic, the texture is an equirect grid of the whole globe, read at the
+			// pixel's unprojected lon/lat (the big map, the planet overlay - their caches survive a
+			// projection change or a re-centring); 1 = pixel space, the texture is the map's own window,
+			// filled per rendered pixel and read at the pixel uv (the zoom map, RPM, the small map). See
+			// dataUVAt.
+			float _PixelSpace;
 
 			// Rows outside [_RowMin, _RowMax] (map rows, inclusive) draw _ClearColor: RPM props reserve
 			// screen rows this way (SCANmap.startLine/stopLine, the CPU path's mapHidden).
@@ -327,6 +328,43 @@ Shader "Hidden/SCANsat/VisualComposite"
 				return float4(n, n, n, 1.0);
 			}
 
+			// Screen pixel -> raw map coordinate (degrees, before unprojection). A planet overlay texture is
+			// laid out the way the body's ScaledSpace UVs read it: u = 0 at 90 degrees east and longitude
+			// decreasing with u - the inverse of Visual's fLon, and what the old CPU overlays' fixLon did per
+			// column.
+			float rawLonAt(float u)
+			{
+				return _PlanetUV > 0.5 ? 90.0 - (u * _MapWidth / _MapScale) : (u * _MapWidth / _MapScale) - 180.0 + _LonOffset;
+			}
+
+			float rawLatAt(float v)
+			{
+				return (v * _MapHeight / _MapScale) - 90.0 + _LatOffset;
+			}
+
+			// Equirect uv of a lon/lat, for a geographic data texture.
+			// NOTE verify orientation in-game; mirror like Visual's fLon if a mode comes out flipped.
+			float2 geoUVOf(float lon, float lat)
+			{
+				return float2(saturate((lon + 180.0) / 360.0), saturate((lat + 90.0) / 180.0));
+			}
+
+			// The one addressing rule for the data textures: where screen pixel p reads them. Pixel space
+			// reads at p itself; geographic reads at the equirect uv of p's unprojected lon/lat. A
+			// neighbour is always the neighbouring SCREEN pixel put through this same rule, so a biome
+			// border stays one screen pixel wide under every projection. Returns 0.0 when p is off the map
+			// (outside the projection's disc), 1.0 otherwise - a float flag, as unproject's.
+			float dataUVAt(float2 p, out float2 uv)
+			{
+				uv = p;
+				if (_PixelSpace > 0.5)
+					return 1.0;
+				float lon, lat;
+				float onMap = unproject(rawLonAt(p.x), rawLatAt(p.y), lon, lat);
+				uv = geoUVOf(lon, lat);
+				return onMap;
+			}
+
 			fixed4 frag(v2f_img i) : SV_Target
 			{
 				// Cosmetic sweep reveal first, before any work: rows ahead of the scanline are discarded (the
@@ -348,14 +386,9 @@ Shader "Hidden/SCANsat/VisualComposite"
 				if (pix.y < _RowMin || pix.y > _RowMax)
 					return _ClearColor;
 
-				// Pixel -> raw coord, then unproject. A planet overlay texture is laid out the way the body's
-				// ScaledSpace UVs read it: u = 0 at 90 degrees east and longitude decreasing with u - the
-				// inverse of Visual's fLon below, and what the old CPU overlays' fixLon did per column.
-				float lonRaw = _PlanetUV > 0.5 ? 90.0 - (i.uv.x * _MapWidth / _MapScale) : (i.uv.x * _MapWidth / _MapScale) - 180.0 + _LonOffset;
-				float latRaw = (vy * _MapHeight / _MapScale) - 90.0 + _LatOffset;
-
+				// Pixel -> raw coord, then unproject (rawLonAt: a planet overlay's columns run the planet's way).
 				float lon, lat;
-				if (unproject(lonRaw, latRaw, lon, lat) < 0.5)
+				if (unproject(rawLonAt(i.uv.x), rawLatAt(vy), lon, lat) < 0.5)
 					return _ClearColor;
 
 				// Coverage stencil lookup (SCANUtil.icLON/icLAT -> Coverage[ilon,ilat]).
@@ -363,11 +396,8 @@ Shader "Hidden/SCANsat/VisualComposite"
 				float ilat = fmod(floor(lat + 270.0), 180.0);
 				float cov = decodeCoverage(float2((ilon + 0.5) / 360.0, (ilat + 0.5) / 180.0));
 
-				// Geographic UVs for the map-resolution data textures (equirectangular).
-				// NOTE verify orientation in-game; mirror like Visual's fLon if a mode comes out flipped.
-				float2 geoUV = float2(saturate((lon + 180.0) / 360.0), saturate((lat + 90.0) / 180.0));
-				float2 elevUV = _ElevPixelSpace > 0.5 ? pixUV : geoUV;
-				float2 resUV = _ResPixelSpace > 0.5 ? pixUV : geoUV;
+				// Where this pixel reads the three data textures (dataUVAt's rule, with the lon/lat in hand).
+				float2 dUV = _PixelSpace > 0.5 ? pixUV : geoUVOf(lon, lat);
 
 				// Base ScaledSpace UV for Visual (SCANmap.cs:1183-1199).
 				float fLat = saturate((lat + 90.0) / 180.0);
@@ -403,7 +433,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 					}
 					else if (covHas(cov, 0.0) || covHas(cov, 1.0))
 					{
-						float elev = tex2D(_ElevationTex, elevUV).r;
+						float elev = tex2D(_ElevationTex, dUV).r;
 						float t = _TerrainRange > 0.0 ? saturate((elev - _TerrainMin) / _TerrainRange) : 0.5;
 						// HiRes -> colour ramp; LoRes-only -> grey ramp (matches CPU nowColor).
 						col = covHas(cov, 1.0) ? tex2D(_PaletteLUT, float2(t, 0.5)) : tex2D(_PaletteGreyLUT, float2(t, 0.5));
@@ -429,16 +459,16 @@ Shader "Hidden/SCANsat/VisualComposite"
 						// geographic cache, or a rectangular window map) its run shrinks by cos(lat), as
 						// SCANUtil.slope's latOffset does.
 						float2 tx = float2(1.0 / _MapWidth, 1.0 / _MapHeight);
-						float e  = tex2D(_ElevationTex, elevUV).r;
-						float eR = tex2D(_ElevationTex, elevUV + float2(tx.x, 0)).r;
-						float eL = tex2D(_ElevationTex, elevUV - float2(tx.x, 0)).r;
-						float eU = tex2D(_ElevationTex, elevUV + float2(0, tx.y)).r;
-						float eD = tex2D(_ElevationTex, elevUV - float2(0, tx.y)).r;
+						float e  = tex2D(_ElevationTex, dUV).r;
+						float eR = tex2D(_ElevationTex, dUV + float2(tx.x, 0)).r;
+						float eL = tex2D(_ElevationTex, dUV - float2(tx.x, 0)).r;
+						float eU = tex2D(_ElevationTex, dUV + float2(0, tx.y)).r;
+						float eD = tex2D(_ElevationTex, dUV - float2(0, tx.y)).r;
 						float dR = abs(eR) > 0.0 ? abs(e - eR) : 0.0;
 						float dL = abs(eL) > 0.0 ? abs(e - eL) : 0.0;
 						float dU = abs(eU) > 0.0 ? abs(e - eU) : 0.0;
 						float dD = abs(eD) > 0.0 ? abs(e - eD) : 0.0;
-						float lonRun = (_ElevPixelSpace < 0.5 || _Projection < 0.5) ? max(cos(lat * DEG2RAD), 0.05) : 1.0;
+						float lonRun = (_PixelSpace < 0.5 || _Projection < 0.5) ? max(cos(lat * DEG2RAD), 0.05) : 1.0;
 						float dx = max(dR, dL) / lonRun;
 						float dy = max(dU, dD);
 						float v = min(max(dx, dy) / (1000.0 / _MapScale), 2.0);
@@ -464,13 +494,17 @@ Shader "Hidden/SCANsat/VisualComposite"
 					}
 					else if (covHas(cov, 3.0))
 					{
-						// biome_indexmap is filled per rendered pixel (unprojected) = map-pixel space, NOT the
-						// geographic equirect grid the big map's elevation cache uses - so sample it at the pixel uv.
-						float bIdx = tex2D(_BiomeIndexTex, pixUV).r;
+						float bIdx = tex2D(_BiomeIndexTex, dUV).r;
 						float2 tx = float2(1.0 / _MapWidth, 1.0 / _MapHeight);
-						// Border: differs from the pixel to the left or the row below (the CPU's mapline compare).
-						float bL = tex2D(_BiomeIndexTex, pixUV - float2(tx.x, 0)).r;
-						float bD = tex2D(_BiomeIndexTex, pixUV - float2(0, tx.y)).r;
+						// Border: differs from the SCREEN pixel to the left or the row below (the CPU's mapline
+						// compare), each read through the same addressing rule as this pixel, so the border is one
+						// screen pixel wide under every projection. A neighbour off the map (outside a projection's
+						// disc) is no border.
+						float2 uvL, uvD;
+						float onL = dataUVAt(pixUV - float2(tx.x, 0), uvL);
+						float onD = dataUVAt(pixUV - float2(0, tx.y), uvD);
+						float bL = onL > 0.5 ? tex2D(_BiomeIndexTex, uvL).r : bIdx;
+						float bD = onD > 0.5 ? tex2D(_BiomeIndexTex, uvD).r : bIdx;
 						// A float flag, not a bool: keep boolean results out of anything FXC can fold into a
 						// movc (see unproject).
 						float edge = (abs(bIdx - bL) > 0.0001 || abs(bIdx - bD) > 0.0001) ? 1.0 : 0.0;
@@ -497,7 +531,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 							float eg = 0.5;
 							if (_HasElevation > 0.5 && (covHas(cov, 0.0) || covHas(cov, 1.0)))
 							{
-								float belev = tex2D(_ElevationTex, elevUV).r;
+								float belev = tex2D(_ElevationTex, dUV).r;
 								eg = _TerrainRange > 0.0 ? saturate((belev - _TerrainMin) / _TerrainRange) : 0.5;
 							}
 							col = lerp(g, float4(eg, eg, eg, 1.0), _BiomeTransparency);
@@ -546,7 +580,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 					bool resLo = covHas(cov, 7.0);
 					if (resHi || resLo)
 					{
-						float ab = tex2D(_ResourceTex, resUV).r * 100.0;   // stored as fraction, *100 -> percent
+						float ab = tex2D(_ResourceTex, dUV).r * 100.0;   // stored as fraction, *100 -> percent
 						if (resLo && !resHi && ab > 0.0)
 							ab = floor(ab / 5.0) * 5.0 + 2.5;              // LoRes 5% buckets (a true zero stays zero, as resourceToColor32)
 						// resourceToColor32 zeroes a below-range abundance and only then tests Abundance == 0,

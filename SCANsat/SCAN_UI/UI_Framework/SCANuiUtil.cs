@@ -689,14 +689,17 @@ namespace SCANsat.SCAN_UI.UI_Framework
 
 		#region Planet Overlay Textures
 
-		internal static void generateResourceCache(ref float[,] values, int height, int width, int stepScale, double scale, SCANmap map)
+		// unproject: the grid is the map's own window in pixel space (a window map), so each cell is
+		// sampled at its unprojected coordinate; else the grid is the globe (the big map, the planet
+		// overlay), and the raw coordinate is the sample coordinate whatever projection the map shows.
+		internal static void generateResourceCache(ref float[,] values, int height, int width, int stepScale, double scale, SCANmap map, bool unproject)
 		{
 			for (int j = 0; j < height; j += stepScale)
 			{
 				for (int i = 0; i < width; i += stepScale)
 				{
 					Vector2d coords;
-					if (map.Projection == MapProjection.Orthographic)
+					if (unproject)
 					{
 						double rLon = (i * 1.0f / scale) - 180f + map.Lon_Offset;
 						double rLat = (j * 1.0f / scale) - 90f + map.Lat_Offset;

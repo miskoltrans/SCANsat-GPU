@@ -37,9 +37,10 @@ namespace SCANsat.SCAN_Map
 			Flat,       // plain stock colours, no borders, no underlay (the planet overlay)
 		}
 
-		/// <summary>true: the elevation cache is geographic over the whole globe (setWidth) and survives
-		/// projection changes; false: pixel space over the current window (setSize), dropped when the
-		/// window moves or zooms. Sets the shader's _ElevPixelSpace / _ResPixelSpace.</summary>
+		/// <summary>true: the three data caches (elevation, biome index, resource grid) are geographic
+		/// over the whole globe (setWidth) and survive projection changes and re-centring; false: pixel
+		/// space over the current window (setSize), dropped when the window moves, zooms or changes
+		/// projection. Sets the shader's _PixelSpace, its one addressing rule.</summary>
 		internal bool GeographicCache { get; private set; }
 
 		/// <summary>false: no timed reveal; the pass is complete when the build is, and nothing is shown

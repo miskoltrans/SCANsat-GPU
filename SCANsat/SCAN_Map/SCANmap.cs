@@ -282,9 +282,10 @@ namespace SCANsat.SCAN_Map
 			}
 
 			projection = p;
-			clearBiomeRowCache();   // the biome index cache is sampled in projected pixel space
+			// A window map's caches are sampled in projected pixel space; a geographic cache is the globe
+			// whatever projection is shown, and stays.
 			if (!profile.GeographicCache)
-				clearWindowCaches();   // and so is a window map's elevation cache
+				clearWindowCaches();
 		}
 
 		internal double projectLongitude(double lon, double lat)
@@ -1223,14 +1224,13 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetFloat("_SunLatCenter", (float)sunLatCenter);
 			compositeMaterial.SetFloat("_Gamma", (float)gamma);
 
-			// Data-texture addressing and the classic-renderer details the shader reproduces. A source
-			// with GeographicCache (the big map, the planet overlay) caches elevation over the globe, so
-			// the shader reads it through the unprojected lon/lat; every other source caches its own
-			// window in pixel space, filled per rendered pixel, and the shader reads it by pixel uv. The
-			// resource cache is pixel space whenever generateResourceCache ran over the map's raw window
-			// (it unprojects for Orthographic, and a window map's raw window is not the globe).
-			compositeMaterial.SetFloat("_ElevPixelSpace", profile.GeographicCache ? 0f : 1f);
-			compositeMaterial.SetFloat("_ResPixelSpace", (!profile.GeographicCache || projection == MapProjection.Orthographic) ? 1f : 0f);
+			// Data-texture addressing, one rule for the three data textures (elevation, biome index,
+			// resource - the shader's dataUVAt), and the classic-renderer details the shader reproduces. A
+			// source with GeographicCache (the big map, the planet overlay) caches them over the globe, so
+			// the shader reads them through the unprojected lon/lat and a projection change or a
+			// re-centring keeps them; every other source caches its own window in pixel space, filled per
+			// rendered pixel, and the shader reads them by pixel uv.
+			compositeMaterial.SetFloat("_PixelSpace", profile.GeographicCache ? 0f : 1f);
 			compositeMaterial.SetFloat("_RowMin", startLine);
 			compositeMaterial.SetFloat("_RowMax", stopLine);
 			compositeMaterial.SetFloat("_Grid", profile.GridDots ? 1f : 0f);
@@ -1663,15 +1663,20 @@ namespace SCANsat.SCAN_Map
 			int h = body != null ? body.flightGlobalsIndex : -1;
 			h = mix(h, resource != null && resource.Name != null ? resource.Name.GetHashCode() : 0);
 			h = mix(h, SCAN_Settings_Config.Instance.BiomeLock ? 1 : 0);   // ResourceOverlay's CheckForLock
-			h = mix(h, (int)projection);                                   // Orthographic unprojects per cell
 			h = mix(h, resourceMapWidth);
 			h = mix(h, resourceMapHeight);
 			h = mix(h, resourceInterpolation);
-			// A window map's grid covers its own window, not the globe: it re-samples when the window moves.
-			h = mix(h, lon_offset.GetHashCode());
-			h = mix(h, lat_offset.GetHashCode());
-			h = mix(h, centeredLat.GetHashCode());
-			h = mix(h, centeredLong.GetHashCode());
+			// A window map's grid covers its own window, not the globe, unprojected per cell: it re-samples
+			// when the window moves, zooms or changes projection. A geographic grid is the globe whatever
+			// projection is shown.
+			if (!profile.GeographicCache)
+			{
+				h = mix(h, (int)projection);
+				h = mix(h, lon_offset.GetHashCode());
+				h = mix(h, lat_offset.GetHashCode());
+				h = mix(h, centeredLat.GetHashCode());
+				h = mix(h, centeredLong.GetHashCode());
+			}
 			// The interpolated cells are noise: randomEdges picks the lerp per cell, the zoom map's hard
 			// edges mirror where a globe wraps, and the sequence is seeded from the save's resource seed.
 			h = mix(h, randomEdges ? 1 : 0);
@@ -1727,12 +1732,15 @@ namespace SCANsat.SCAN_Map
 		// CPU buffer - GetRawTextureData<float> is a view over storage Unity has already allocated, not
 		// a copy. The full-size Color[] mirror this replaced cost 16 bytes a pixel, 16 MB standing per
 		// 1440x720 map, to clear each texture once.
-		private void ensureDataTex(ref Texture2D tex)
+		// point: no filtering - the biome index is a label, and a geographic cache is read at arbitrary
+		// points under a non-rectangular projection, where a bilinear blend of two labels is a third biome.
+		private void ensureDataTex(ref Texture2D tex, bool point = false)
 		{
 			if (tex != null && tex.width == mapwidth && tex.height == mapheight) return;
 			if (tex != null) UnityEngine.Object.Destroy(tex);
 			tex = new Texture2D(mapwidth, mapheight, TextureFormat.RFloat, false);
 			tex.wrapMode = TextureWrapMode.Clamp;
+			tex.filterMode = point ? FilterMode.Point : FilterMode.Bilinear;
 			// TextureFormat.RFloat is one float per pixel, so this view is exactly mapwidth * mapheight
 			// long. global:: because this namespace is SCANsat.SCAN_Map, where a bare "Unity" binds to
 			// SCANsat.Unity rather than to UnityEngine's Unity.Collections.
@@ -1791,7 +1799,7 @@ namespace SCANsat.SCAN_Map
 
 			resourceGridKey.Invalidate();   // a throw mid-build must not leave a half-sampled grid stamped valid
 
-			SCANuiUtil.generateResourceCache(ref resourceCache, resourceMapHeight, resourceMapWidth, resourceInterpolation, resourceMapScale, this);
+			SCANuiUtil.generateResourceCache(ref resourceCache, resourceMapHeight, resourceMapWidth, resourceInterpolation, resourceMapScale, this, !profile.GeographicCache);
 			if (profile.AutoRange)
 				applyAutoResourceRange();   // from the sampled cells, before interpolation fills the gaps
 			System.Random rr = new System.Random(ResourceScenario.Instance.gameSettings.Seed);
@@ -2241,11 +2249,11 @@ namespace SCANsat.SCAN_Map
 				return;
 			}
 
-			// Biome rows are cached in biome_indexmap (per body / size / projection, like the height
-			// cache): a row already sampled skips the per-pixel biome lookups entirely.
+			// Biome rows are cached in biome_indexmap (per body and size, and per window for a pixel-space
+			// map, like the height cache): a row already sampled skips the per-pixel biome lookups entirely.
 			bool wantBiome = mType == mapType.Biome && biomeMap && biomeRowCached != null && row < biomeRowCached.Length && !biomeRowCached[row];
-			// Elevation for the planet layout only comes from the geographic height grid (the terrain
-			// overlay); a PQS sample stored by column would land at the wrong longitude.
+			// The planet overlay's elevation comes only from the body's prebuilt height grid (the terrain
+			// overlay never samples PQS on its own account).
 			bool wantElev = mType != mapType.Visual && (mType != mapType.Biome || profile.BiomeUnderlay)
 				&& (!profile.PlanetUV || heightGridPass) && pqs && big_heightmap != null;
 
@@ -2258,9 +2266,10 @@ namespace SCANsat.SCAN_Map
 
 			for (int i = 0; i < mapwidth; i++)
 			{
-				// Column i's longitude: the map's raw grid, or the planet's UV layout for an overlay (the
-				// shader maps its pixels the same way, so the pixel-space biome index lines up).
-				double rawLon = profile.PlanetUV ? SCANUtil.fixLonShift(90.0 - (i * 1.0 / mapscale)) : (i * 1.0f / mapscale) - 180f + lon_offset;
+				// Column i's longitude on the map's raw grid. (A planet overlay's pixels run the planet's
+				// way, but its caches are geographic: the shader maps each pixel back to the true longitude
+				// and reads them there, so nothing here needs the planet's layout.)
+				double rawLon = (i * 1.0f / mapscale) - 180f + lon_offset;
 
 				if (wantElev && big_heightmap[i, row] == 0f)
 				{
@@ -2297,13 +2306,21 @@ namespace SCANsat.SCAN_Map
 					continue;
 				}
 
-				double lat = unprojectLatitude(rawLon, rawLat);
-				double lon = unprojectLongitude(rawLon, rawLat);
+				// The biome cache has the elevation cache's layout: the globe's own grid for a geographic
+				// cache (the raw coords are the sample coords, as for elevation above), else this pixel's
+				// unprojected coordinate, where the shader reads it by pixel uv.
+				double lat = rawLat, lon = rawLon;
 
-				if (double.IsNaN(lat) || double.IsNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180)
+				if (!profile.GeographicCache)
 				{
-					biomeIndex[i] = 0;
-					continue;
+					lat = unprojectLatitude(rawLon, rawLat);
+					lon = unprojectLongitude(rawLon, rawLat);
+
+					if (double.IsNaN(lat) || double.IsNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180)
+					{
+						biomeIndex[i] = 0;
+						continue;
+					}
 				}
 
 				// One biome lookup per pixel: the shader colourises from _BiomeLUT[biomeIndex] (stock
@@ -2373,7 +2390,7 @@ namespace SCANsat.SCAN_Map
 							biome_indexmap[bi, mapstep] = (float)biomeIndex[bi];
 						biomeRowCached[mapstep] = true;
 					}
-					ensureDataTex(ref biomeIndexTex);
+					ensureDataTex(ref biomeIndexTex, true);
 					stageDataRow(biomeIndexTex, biome_indexmap, mapstep);
 					biomeDirty = true;
 				}
