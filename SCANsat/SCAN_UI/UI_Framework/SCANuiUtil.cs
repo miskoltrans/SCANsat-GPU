@@ -777,38 +777,52 @@ namespace SCANsat.SCAN_UI.UI_Framework
 		{
 			for (int j = y; j < height + y; j += 2 * step)
 			{
+				// Latitude has no wrap, so a neighbour off the top or bottom mirrors to the one on the
+				// other side rather than clamping to the edge row. Clamping folded j itself into the
+				// vertical average, and at the coarsest pass the row it clamped to had not been written
+				// yet - so a zero leaked in, and every finer pass spread it further down the cap. On a
+				// body with uniform abundance the north cap decayed to 12 percent of the truth by the
+				// top row and the south pole row read 69 percent; mirroring keeps both ends an average
+				// of two cells that hold real data. generateResourceCache samples no higher than
+				// height - stepScale, so the rows above the last sample are a flat extension of it.
 				int ypos1 = j - step;
+				int ypos2 = j + step;
+
 				if (ypos1 < 0)
 				{
-					ypos1 = 0;
+					ypos1 = ypos2 < height ? ypos2 : j;
 				}
 
-				int ypos2 = j + step;
 				if (ypos2 >= height)
 				{
-					ypos2 = height - 1;
+					ypos2 = ypos1;
 				}
 
 				for (int i = x; i < width + x; i += 2 * step)
 				{
 					int xpos1 = i - step;
+					int xpos2 = i + step;
+
+					// The same mirror along the other axis for a window map (hardEdges), whose left and
+					// right edges are real edges and were clamping onto the cell being written. A
+					// full-globe map wraps at the seam instead, which was already right.
 					if (xpos1 < 0)
 					{
 						if (hardEdges)
 						{
-							xpos1 = 0;
+							xpos1 = xpos2 < width ? xpos2 : i;
 						}
 						else
 						{
 							xpos1 += width;
 						}
 					}
-					int xpos2 = i + step;
+
 					if (xpos2 >= width)
 					{
 						if (hardEdges)
 						{
-							xpos2 = width - 1;
+							xpos2 = xpos1;
 						}
 						else
 						{

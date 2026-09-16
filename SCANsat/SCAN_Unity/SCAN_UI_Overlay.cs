@@ -933,6 +933,17 @@ namespace SCANsat.SCAN_Unity
 				}
 
 				mapOverlay = new Texture2D(outWidth, outHeight, TextureFormat.ARGB32, true);
+				// A Texture2D defaults to Repeat on both axes, and the scaled-space sphere puts its pole
+				// vertices at v = 0 and v = 1 exactly - where the bilinear fetch lands half a texel outside
+				// the map and wraps, blending the north polar row with the south polar row over both caps.
+				// Latitude has no wrap to honour, so clamp it; longitude does, so the seam keeps Repeat
+				// (the same split SCANcontroller gives a body's ScaledSpace textures).
+				mapOverlay.wrapModeU = TextureWrapMode.Repeat;
+				mapOverlay.wrapModeV = TextureWrapMode.Clamp;
+				// The sphere is edge-on at the poles, where the runaway longitude derivative drags an
+				// isotropic mip far coarser than the latitude axis needs and rings the cap with bands.
+				// Anisotropic sampling takes the mip from the short axis instead.
+				mapOverlay.anisoLevel = 9;
 			}
 
 			RenderTexture prev = RenderTexture.active;
