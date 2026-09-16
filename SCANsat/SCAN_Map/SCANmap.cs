@@ -887,6 +887,8 @@ namespace SCANsat.SCAN_Map
 			private Color[] gpuRowBuf;
 			private bool resourceTexReady;
 			private bool resourceCacheReady;   // resourceCache is built this reset (by the prep loop or the lazy GPU build)
+			private int resourceCacheHash;     // the config resourceCache was sampled for; 0 = nothing valid in it
+			private int resourceTexHash;       // the config resourceTex was uploaded from; 0 = nothing uploaded yet
 			private int paletteLUTHash;
 			private bool gpuDataComplete;   // the non-Visual data cache is fully sampled for gpuDataHash's config
 			private int gpuDataHash;        // config (body/mode/projection/size/offsets/coverage) the cached data is valid for
@@ -1077,8 +1079,11 @@ namespace SCANsat.SCAN_Map
 				// exactly the new cells.
 				int configHash = gpuConfigHash();
 
-				if (gpuDataComplete && gpuDataHash == configHash
-					&& !(resourceActive && SCANconfigLoader.GlobalResource && resource != null))   // resource maps need the prep to rebuild resourceCache (resetResourceMap clears it)
+				// A resource layer used to force the full prep here, because resetResourceMap wiped the
+				// abundance grid on every reset. It keeps the grid now (resourceConfigHash decides when to
+				// re-sample), so a resource map takes this shortcut like any other: the composite's lazy
+				// buildResourceCache finds the grid it already has.
+				if (gpuDataComplete && gpuDataHash == configHash)
 				{
 					mapstep = 0;               // replay the sweep from the top...
 					gpuRendered = true;
@@ -1121,11 +1126,11 @@ namespace SCANsat.SCAN_Map
 				}
 			}
 
-			// Null until a resource layer has actually run on this map (buildResourceCache sizes it).
-			if (resourceCache != null)
-			{
-				System.Array.Clear(resourceCache, 0, resourceCache.Length);
-			}
+			// The grid itself is kept. Stock abundance is a static field: it does not change with scan
+			// coverage (the shader masks the layer with the live coverage texture), with the cutoff, or with
+			// the layer's colours - those are all shader uniforms. buildResourceCache re-samples only when
+			// its config key says the grid is stale, and clears it itself when it does. Wiping it here made
+			// every reset - a refresh, a cutoff nudge, a colour change - pay for a full re-sample.
 		}
 
 		/* MAP: export: PNG file */
@@ -1662,6 +1667,54 @@ namespace SCANsat.SCAN_Map
 			return h;
 		}
 
+		/// <summary>
+		/// Config key for resourceCache: everything generateResourceCache and the interpolation passes
+		/// read. Deliberately NOT coverage - the shader masks the layer with the live coverage texture, so
+		/// newly scanned ground reveals from the grid that is already there - and not the cutoff, the
+		/// range or the layer's colours, which are shader uniforms the composite sets every frame.
+		/// </summary>
+		private int resourceConfigHash()
+		{
+			int h = body != null ? body.flightGlobalsIndex : -1;
+			h = h * 31 + (resource != null && resource.Name != null ? resource.Name.GetHashCode() : 0);
+			h = h * 31 + (SCAN_Settings_Config.Instance.BiomeLock ? 1 : 0);   // ResourceOverlay's CheckForLock
+			h = h * 31 + (int)projection;                                     // Orthographic unprojects per cell
+			h = h * 31 + resourceMapWidth;
+			h = h * 31 + resourceMapHeight;
+			h = h * 31 + resourceInterpolation;
+			// A window map's grid covers its own window, not the globe: it re-samples when the window moves.
+			h = h * 31 + lon_offset.GetHashCode();
+			h = h * 31 + lat_offset.GetHashCode();
+			h = h * 31 + centeredLat.GetHashCode();
+			h = h * 31 + centeredLong.GetHashCode();
+			// The interpolated cells are noise: randomEdges picks the lerp per cell, the zoom map's hard
+			// edges mirror where a globe wraps, and the sequence is seeded from the save's resource seed.
+			h = h * 31 + (randomEdges ? 1 : 0);
+			h = h * 31 + (int)mSource;
+			h = h * 31 + (ResourceScenario.Instance != null ? ResourceScenario.Instance.gameSettings.Seed : 0);
+
+			// The one part of the field that play can change. With the lock on, stock hands back the biome's
+			// average until a surface scan unlocks that biome, so landing a scanner has to re-sample - which
+			// is what happened for free when every reset re-sampled. A few dozen lookups per reset.
+			if (SCAN_Settings_Config.Instance.BiomeLock && ResourceMap.Instance != null
+				&& body != null && body.BiomeMap != null && body.BiomeMap.Attributes != null)
+			{
+				CBAttributeMapSO.MapAttribute[] atts = body.BiomeMap.Attributes;
+
+				for (int i = 0; i < atts.Length; i++)
+				{
+					if (atts[i] == null)
+					{
+						continue;
+					}
+
+					h = h * 31 + (ResourceMap.Instance.IsBiomeUnlocked(body.flightGlobalsIndex, atts[i].name) ? i + 1 : 0);
+				}
+			}
+
+			return h == 0 ? 1 : h;   // 0 is reserved for "no grid"
+		}
+
 		private int coverageChecksum()
 		{
 			if (data == null || data.Coverage == null)
@@ -1716,17 +1769,43 @@ namespace SCANsat.SCAN_Map
 			tex.SetPixels(0, row, mapwidth, 1, gpuRowBuf);
 		}
 
-		// Upload resourceCache (geographic resW x resH) as an R-float abundance texture (fraction 0..1).
 		// Build resourceCache (stock abundance) - the GPU paths (Visual short-circuit, fake-sweep fast
-		// path) skip the prep loop that normally builds it, and resetResourceMap clears it every reset.
+		// path) skip the prep loop that normally built it, so a pass's first composite calls this.
+		// Sampling is the most expensive thing left in a pass: the grid takes (2H/N)x(H/N) calls into
+		// stock GetAbundance, each carrying a biome-map lookup, so at the settings' ceiling (map height
+		// 1024, interpolation 2) it is 524,288 of them - about a second, in one frame, with no way to
+		// spend it under the build budget. Hence the config key: the grid outlives the reset that used to
+		// wipe it, and only a different body / resource / window / grid actually re-samples.
 		private void buildResourceCache()
 		{
+			int hash = resourceConfigHash();
+			bool sized = resourceCache != null && resourceCache.GetLength(0) == resourceMapWidth && resourceCache.GetLength(1) == resourceMapHeight;
+
+			if (sized && resourceCacheHash == hash)
+			{
+				// The same field, already sampled. The auto-range fit is re-run because the windows' own UI
+				// (setCustomRange) may have overwritten the range since; interpolation never rewrites the
+				// sampled cells that fit reads, so a reused grid fits to exactly what a fresh one would.
+				if (autoRange)
+					applyAutoResourceRange();
+
+				return;
+			}
+
 			// The one owner of this array's size: generateResourceCache writes into it and never
 			// allocates, and nothing else in the class does now - a map with no resource layer keeps none.
-			if (resourceCache == null || resourceCache.GetLength(0) != resourceMapWidth || resourceCache.GetLength(1) != resourceMapHeight)
+			if (!sized)
 			{
 				resourceCache = new float[resourceMapWidth, resourceMapHeight];
 			}
+			else
+			{
+				// A grid whose width or height is not a whole number of steps has cells that neither the
+				// sampling nor the interpolation passes write; they must not keep the old config's values.
+				System.Array.Clear(resourceCache, 0, resourceCache.Length);
+			}
+
+			resourceCacheHash = 0;   // a throw mid-build must not leave a half-sampled grid stamped valid
 
 			SCANuiUtil.generateResourceCache(ref resourceCache, resourceMapHeight, resourceMapWidth, resourceInterpolation, resourceMapScale, this);
 			if (autoRange)
@@ -1738,8 +1817,11 @@ namespace SCANsat.SCAN_Map
 				SCANuiUtil.interpolate(resourceCache, resourceMapHeight, resourceMapWidth, 0, i, i, rr, randomEdges, mSource == mapSource.ZoomMap);
 				SCANuiUtil.interpolate(resourceCache, resourceMapHeight, resourceMapWidth, i, 0, i, rr, randomEdges, mSource == mapSource.ZoomMap);
 			}
+
+			resourceCacheHash = hash;
 		}
 
+		// Upload resourceCache (geographic resW x resH) as an R-float abundance texture (fraction 0..1).
 		private void uploadResourceTexture()
 		{
 			if (resourceCache == null) return;
@@ -1748,13 +1830,27 @@ namespace SCANsat.SCAN_Map
 				if (resourceTex != null) UnityEngine.Object.Destroy(resourceTex);
 				resourceTex = new Texture2D(resourceMapWidth, resourceMapHeight, TextureFormat.RFloat, false);
 				resourceTex.wrapMode = TextureWrapMode.Clamp;
+				resourceTexHash = 0;
 			}
-			Color[] buf = new Color[resourceMapWidth * resourceMapHeight];
+			else if (resourceTexHash != 0 && resourceTexHash == resourceCacheHash)
+			{
+				return;   // this texture already holds this grid
+			}
+
+			// Written through the raw texture data rather than SetPixels: RFloat is one float per pixel in
+			// the same bottom-up row order, so the Color[] mirror SetPixels wants was 16 bytes a pixel of
+			// pure garbage - 33 MB on the large object heap per upload at the 2048x1024 ceiling, thrown
+			// away again on every reset. Same pattern as ensureDataTex. global:: because a bare "Unity"
+			// binds to SCANsat.Unity in this namespace.
+			global::Unity.Collections.NativeArray<float> raw = resourceTex.GetRawTextureData<float>();
 			for (int y = 0; y < resourceMapHeight; y++)
+			{
+				int row = y * resourceMapWidth;
 				for (int x = 0; x < resourceMapWidth; x++)
-					buf[y * resourceMapWidth + x] = new Color(resourceCache[x, y] / 100f, 0f, 0f, 0f);
-			resourceTex.SetPixels(buf);
+					raw[row + x] = resourceCache[x, y] / 100f;
+			}
 			resourceTex.Apply(false);
+			resourceTexHash = resourceCacheHash;
 		}
 
 		// Bake heightToColor across [min, min+range] into a 1-D LUT so the shader is a plain fetch and
