@@ -257,6 +257,19 @@ namespace SCANsat.SCAN_Map
 
 		/* MAP: Big Map height map caching */
 		private float[,] big_heightmap;
+		// Geographic grids for bodies this map is not currently showing. A body switch used to zero the
+		// cache, so coming back re-sampled every covered pixel from PQS - about 1.3 s of CPU on a
+		// scanned RSS body at 1440 wide, five seconds of wall clock under the per-frame build budget.
+		// Park them instead: terrain does not change at runtime, and zero still means "unsampled", so a
+		// grid handed back is never wrong, only incomplete - there is nothing to invalidate. setWidth
+		// drops the lot, so every parked grid is always at the current width and the memory budget is
+		// just a count of them.
+		private readonly Dictionary<int, float[,]> parkedHeightmaps = new Dictionary<int, float[,]>();
+		private readonly List<int> parkedOrder = new List<int>();   // least recently parked first
+		// Parked grids outlive a scene change, as the live one does, so this is a standing cost once you
+		// have browsed a few bodies. 32 MB is every body in an RSS system at the 720 default (about
+		// 1 MB each), seven of them at 1440, and none at all at a width where one grid cannot fit.
+		private const long ParkedHeightmapBudget = 32L << 20;
 		// Which cache layout this map uses. The big map's elevation cache is geographic over the whole
 		// globe, so it survives projection changes; every other map's caches are pixel space over its
 		// current window (see prepRow, clearWindowCaches, _ElevPixelSpace).
@@ -622,6 +635,10 @@ namespace SCANsat.SCAN_Map
 			big_heightmap = null;
 			biome_indexmap = null;
 			biomeRowCached = null;
+			// Every parked grid is at the old width, so none of them can be handed back. Dropping them
+			// here is also what lets the budget below be a count: all parked grids share one size.
+			parkedHeightmaps.Clear();
+			parkedOrder.Clear();
 			// Just wiped big_heightmap/biome_indexmap. mapwidth is part of gpuConfigHash so
 			// the stale claim can't match today, but the caches are empty either way - don't leave a
 			// "data is complete" flag standing behind them.
@@ -671,9 +688,10 @@ namespace SCANsat.SCAN_Map
 			// The managed caches too. bigmap/spotmap being STATIC is exactly why: without this their
 			// arrays stay resident for the whole session, across every scene change, for a window that
 			// may never open again - 4 MB of biome index and half a MB of resource cache on a 1440x720
-			// RSS map. The elevation cache is the exception: it holds this body's PQS samples, which
-			// cost seconds to take on RSS (8188f282), and prepRow's "unsampled" check reuses them on the
-			// next pass even though the data textures are gone. The biome index is one stock biome-map
+			// RSS map. The elevation caches are the exception - the live one and the parked ones alike:
+			// they hold PQS samples, which cost seconds to take on RSS (8188f282), and prepRow's
+			// "unsampled" check reuses them on the next pass even though the data textures are gone.
+			// ParkedHeightmapBudget is what bounds the parked ones. The biome index is one stock biome-map
 			// lookup per pixel to refill, and resetMap zeroes the resource cache on every pass anyway,
 			// so neither is worth carrying. ensureModeCaches re-sizes whatever the next pass reads.
 			biome_indexmap = null;
@@ -906,6 +924,7 @@ namespace SCANsat.SCAN_Map
 			SCANcontroller.controller.unloadOnDemandScaledSpace(body, mSource);
 
 			bool bodyChanged = body != b;
+			int outgoingBody = body != null ? body.flightGlobalsIndex : -1;   // `body` is reassigned below
 
 			if (bodyChanged)
 			{
@@ -929,12 +948,12 @@ namespace SCANsat.SCAN_Map
 
 			// The height and biome-index caches are per body: terrain and biomes do not change at
 			// runtime, and new coverage is picked up per pixel by the "unsampled" checks. So they
-			// survive same-body calls (the big map calls setBody on every open) and clear only when the
-			// body actually changes.
+			// survive same-body calls (the big map calls setBody on every open), and on a real body
+			// change the height grid is parked rather than zeroed - see swapParkedHeightmap. The biome
+			// index is not worth parking: one stock biome-map lookup per pixel to refill.
 			if (geographicCache && bodyChanged)
 			{
-				if (big_heightmap != null)
-					System.Array.Clear(big_heightmap, 0, big_heightmap.Length);
+				swapParkedHeightmap(outgoingBody, body.flightGlobalsIndex);
 				clearBiomeRowCache();
 			}
 
@@ -1843,6 +1862,42 @@ namespace SCANsat.SCAN_Map
 				case 1: return 2.0;
 				case 3: return 8.0;
 				default: return 4.0;
+			}
+		}
+
+		/// <summary>
+		/// A body change on a geographic map (the big map): park the grid we are leaving and take back
+		/// the one we are going to, if it is still parked and still the right size. Everything parked is
+		/// at the current width, so the byte budget reduces to a count - and at a width where a single
+		/// grid does not fit, that count is zero and this degrades to the old clear-and-resample.
+		/// </summary>
+		private void swapParkedHeightmap(int outgoing, int incoming)
+		{
+			if (big_heightmap != null && outgoing >= 0)
+			{
+				parkedHeightmaps[outgoing] = big_heightmap;
+				parkedOrder.Remove(outgoing);
+				parkedOrder.Add(outgoing);
+			}
+
+			big_heightmap = null;   // ensureModeCaches allocates on the reset that follows setBody
+
+			// The size check is the guard, not the key: a grid parked before a resize is dead weight.
+			if (parkedHeightmaps.TryGetValue(incoming, out float[,] grid)
+				&& grid.GetLength(0) == mapwidth && grid.GetLength(1) == mapheight)
+			{
+				big_heightmap = grid;
+				parkedHeightmaps.Remove(incoming);
+				parkedOrder.Remove(incoming);
+			}
+
+			long gridBytes = (long)mapwidth * mapheight * sizeof(float);
+			int maxParked = gridBytes > 0 ? (int)(ParkedHeightmapBudget / gridBytes) : 0;
+
+			while (parkedOrder.Count > maxParked)
+			{
+				parkedHeightmaps.Remove(parkedOrder[0]);
+				parkedOrder.RemoveAt(0);
 			}
 		}
 
