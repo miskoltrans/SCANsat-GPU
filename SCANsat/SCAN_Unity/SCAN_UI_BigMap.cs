@@ -610,7 +610,7 @@ namespace SCANsat.SCAN_Unity
 
 			if (!bigmap.isMapComplete())
 			{
-				bigmap.getPartialMap();   // one call per frame; MapGenerationSpeed is the map's per-frame CPU budget
+				bigmap.getPartialMap();   // one call per frame; the map generation budget caps what it spends
 			}
 
 			if (OrbitToggle && ShowOrbit)

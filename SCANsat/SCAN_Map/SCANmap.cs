@@ -897,13 +897,14 @@ namespace SCANsat.SCAN_Map
 		// The GPU compositor draws the whole Visual map in one Blit; the scanline is a purely cosmetic
 		// reveal (in the CPU path's row order) so it matches the CPU modes' look. Visual and the
 		// recolour re-sweep have their end state on the first Blit, so their line is paced by wall-clock
-		// time (SweepDuration) rather than by pump calls: a pass takes the same second on any map size,
-		// frame rate or MapGenerationSpeed. The data modes build row by row, so their line tracks
+		// time (the scanline setting) rather than by pump calls: a pass takes the same time on any map
+		// size, frame rate or map generation budget. The data modes build row by row, so their line tracks
 		// mapstep instead. gpuSweepDone gates isMapComplete so the pump keeps re-compositing until the
 		// reveal finishes.
 		private bool gpuSweepDone;
 		private float sweepStart = -1f;   // realtimeSinceStartup at this pass's first composite; -1 until then
-		private const float SweepDuration = 1f;
+		private float sweepDuration = BaseSweepDuration;   // this pass's sweep length; taken when its clock starts
+		private const float BaseSweepDuration = 1f;        // the sweep at 1x - the scanline setting scales this
 		private float noiseSeed;          // per-pass seed for the shader's no-data static (re-rolled in resetMap like the CPU's Random.value per pass)
 
 		// Per-source behaviour switches. Defaults are the map windows'; the planet overlay and the
@@ -1285,10 +1286,10 @@ namespace SCANsat.SCAN_Map
 			// RawImage - already pointed at visualRenderTex - in place. Rows ahead of the line keep the
 			// previous pass (shader discard); the RT was filled with the background only when created,
 			// like the CPU path's fresh Texture2D. Redline = palette.Red.
-			// The line is paced by time (SweepDuration) but never runs ahead of the rows built: Visual and
-			// the recolour re-sweep have their end state at once, so they always get the full timed sweep;
-			// a data pass (buildGpuDataFrame) is clamped to mapstep / mapheight, so a warm cache sweeps in
-			// SweepDuration and a cold one shows the line at the real sampling pace.
+			// The line is paced by time (the scanline setting) but never runs ahead of the rows built: Visual
+			// and the recolour re-sweep have their end state at once, so they always get the full timed sweep;
+			// a data pass (buildGpuDataFrame) is clamped to mapstep / mapheight, so a warm cache sweeps in the
+			// set time and a cold one shows the line at the real sampling pace, however fast the setting is.
 			float reveal = 1f;
 			if (mapheight > 0)
 			{
@@ -1459,8 +1460,24 @@ namespace SCANsat.SCAN_Map
 		{
 			float now = Time.realtimeSinceStartup;
 			if (sweepStart < 0f)
+			{
 				sweepStart = now;
-			return Mathf.Clamp01((now - sweepStart) / SweepDuration);
+				sweepDuration = configuredSweepDuration();
+			}
+
+			if (sweepDuration <= 0f)
+				return 1f;   // Instant: no reveal, the pass shows whatever it has
+
+			return Mathf.Clamp01((now - sweepStart) / sweepDuration);
+		}
+
+		// The scanline setting is a speed multiplier on the one second sweep, 0 meaning Instant. Taken
+		// once per pass rather than read per frame: moving the slider mid-sweep would otherwise rescale
+		// the elapsed fraction and run the line back up over rows it had already revealed.
+		private static float configuredSweepDuration()
+		{
+			float speed = SCAN_Settings_Config.Instance.ScanlineSpeed;
+			return speed > 0f ? BaseSweepDuration / speed : 0f;
 		}
 
 		/// <summary>
@@ -1949,16 +1966,12 @@ namespace SCANsat.SCAN_Map
 			coverageFlagsDirty = false;
 		}
 
-		// Per-frame CPU budget for building a GPU data pass, by MapGenerationSpeed. Replaces the
-		// one-row-per-call cadence for the GPU data modes; the CPU renderer still goes by rows per call.
+		// Per-frame CPU budget for building a GPU data pass: the setting is the budget, in milliseconds.
+		// It replaced the one-row-per-call cadence for the GPU data modes; the CPU renderer still goes by
+		// rows per call. The slider offers 2/4/8/16; the clamp is for a hand-edited settings file.
 		private static double gpuBuildBudgetMs()
 		{
-			switch (SCAN_Settings_Config.Instance.MapGenerationSpeed)
-			{
-				case 1: return 2.0;
-				case 3: return 8.0;
-				default: return 4.0;
-			}
+			return Mathf.Clamp(SCAN_Settings_Config.Instance.MapGenerationBudgetMs, 1, 50);
 		}
 
 		/// <summary>
@@ -2340,7 +2353,7 @@ namespace SCANsat.SCAN_Map
 		// GPU data modes (Altimetry / Slope / Biome on the cache=true big map). Builds the pass under a
 		// per-frame CPU budget instead of one row per pump call, stages the rows into the data textures
 		// and uploads each texture once, then composites once. tryRenderGPU keeps the reveal at the
-		// smaller of the timed sweep and the rows built, so a warm cache sweeps in SweepDuration and a
+		// smaller of the timed sweep and the rows built, so a warm cache sweeps in the set time and a
 		// cold one shows the line at the real sampling pace. The resource cache is not built here: the
 		// first composite builds it lazily (setModeUniforms -> buildResourceCache), as for Visual.
 		private void buildGpuDataFrame()

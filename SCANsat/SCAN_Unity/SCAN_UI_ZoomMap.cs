@@ -631,7 +631,7 @@ namespace SCANsat.SCAN_Unity
 
 			if (!spotmap.isMapComplete())
 			{
-				spotmap.getPartialMap();   // one call per frame; MapGenerationSpeed is the map's per-frame CPU budget
+				spotmap.getPartialMap();   // one call per frame; the map generation budget caps what it spends
 			}
 			else if (rebuilding)
 			{
