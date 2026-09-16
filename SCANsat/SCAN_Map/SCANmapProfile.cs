@@ -139,7 +139,7 @@ namespace SCANsat.SCAN_Map
 					{
 						GeographicCache = false,
 						Sweep = true,
-						BiomeUnderlay = true,
+						BiomeUnderlay = false,   // its biome transparency is 0, so an underlay would be sampled and never seen
 						PlanetUV = false,
 						AutoRange = false,
 						HeightGrid = true,
