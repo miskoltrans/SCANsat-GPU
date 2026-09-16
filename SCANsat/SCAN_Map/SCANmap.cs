@@ -1252,12 +1252,12 @@ namespace SCANsat.SCAN_Map
 			}
 			compositeMaterial.SetColor("_UnscannedColor", unscanned);
 			compositeMaterial.SetColor("_ClearColor", palette.Clear);
-				Color greyCol = palette.Grey; greyCol.a = 1f;
-				compositeMaterial.SetColor("_GreyColor", greyCol);
+			Color greyCol = palette.Grey; greyCol.a = 1f;
+			compositeMaterial.SetColor("_GreyColor", greyCol);
 
-				// Mode select + the non-Visual data textures / LUTs / overlay uniforms.
-				compositeMaterial.SetFloat("_MapMode", (float)(int)mType);
-				setModeUniforms();
+			// Mode select + the non-Visual data textures / LUTs / overlay uniforms.
+			compositeMaterial.SetFloat("_MapMode", (float)(int)mType);
+			setModeUniforms();
 
 			// Re-compositing each frame with a new reveal fraction animates the RawImage - already pointed
 			// at visualRenderTex - in place. A source without a sweep (the planet overlay) composites once,
