@@ -973,7 +973,7 @@ namespace SCANsat.SCAN_Map
 
 		public void resetMap(bool resourceOn, bool setRes = true)
 		{
-			mapstep = -2;
+			mapstep = 0;   // rows built this pass
 			gpuRendered = false;
 			gpuSweepDone = false;
 			gpuRecolorSweep = false;   // a recolour in flight ends here; the shortcut below decides afresh. Left set, a mode switch mid-sweep re-Blit the new mode from textures never built for it.
@@ -2191,92 +2191,76 @@ namespace SCANsat.SCAN_Map
 			budgetUsedTicks += ticks;
 		}
 
-		// The CPU sampling for row mapstep: the elevation look-ahead into big_heightmap (row mapstep+1)
-		// and, in Biome mode, biomeIndex for the current row. buildGpuDataFrame stages the results into
-		// the data textures; the shader does all the colourising.
-		private void prepRow()
+		// The CPU sampling for one map row: elevation into big_heightmap where the cache has none, and in
+		// Biome mode the biome index into biomeIndex. buildGpuDataFrame stages the results into the data
+		// textures; the shader does all the colourising, and reads its own neighbouring texels for the
+		// slope and the biome borders, so no row needs another row sampled first.
+		private void prepRow(int row)
 		{
-			bool mapHidden = mapstep < startLine || mapstep > stopLine;
+			// RPM reserved rows: the shader draws them clear, so nothing is sampled for them.
+			if (row < startLine || row > stopLine)
+			{
+				return;
+			}
 
 			// Biome rows are cached in biome_indexmap (per body / size / projection, like the height
 			// cache): a row already sampled skips the per-pixel biome lookups entirely.
-			bool biomeRowDone = biomeRowCached != null && mapstep >= 0 && mapstep < biomeRowCached.Length && biomeRowCached[mapstep];
+			bool wantBiome = mType == mapType.Biome && biomeMap && biomeRowCached != null && row < biomeRowCached.Length && !biomeRowCached[row];
+			// Elevation for the planet layout only comes from the geographic height grid (the terrain
+			// overlay); a PQS sample stored by column would land at the wrong longitude.
+			bool wantElev = mType != mapType.Visual && (mType != mapType.Biome || profile.BiomeUnderlay)
+				&& (!profile.PlanetUV || heightGridPass) && pqs && big_heightmap != null;
+
+			if (!wantBiome && !wantElev)
+			{
+				return;
+			}
+
+			double rawLat = (row * 1.0f / mapscale) - 90f + lat_offset;
 
 			for (int i = 0; i < mapwidth; i++)
 			{
-				/* Introduce altimetry check here; Use unprojected lat/long coordinates
-				 * All cached altimetry data stored in a single 2D array in rectangular format
-				 * Pull altimetry data from cache after unprojection
-				 */
-
-
-				double cacheLat = ((mapstep + 1) * 1.0f / mapscale) - 90f + lat_offset;
 				// Column i's longitude: the map's raw grid, or the planet's UV layout for an overlay (the
 				// shader maps its pixels the same way, so the pixel-space biome index lines up).
-				double lon = profile.PlanetUV ? SCANUtil.fixLonShift(90.0 - (i * 1.0 / mapscale)) : (i * 1.0f / mapscale) - 180f + lon_offset;
+				double rawLon = profile.PlanetUV ? SCANUtil.fixLonShift(90.0 - (i * 1.0 / mapscale)) : (i * 1.0f / mapscale) - 180f + lon_offset;
 
-				// Elevation for the planet layout only comes from the geographic height grid (the terrain
-				// overlay); a PQS sample stored by column would land at the wrong longitude.
-				bool elevationSource = !profile.PlanetUV || heightGridPass;
-
-				if (mType != mapType.Visual && (mType != mapType.Biome || profile.BiomeUnderlay) && elevationSource)
+				if (wantElev && big_heightmap[i, row] == 0f)
 				{
-					int lookAhead = mapstep + 1;
-					bool lookAheadHidden = lookAhead < startLine || lookAhead > stopLine;   // RPM reserved rows: the shader draws them clear
+					// The big map's cache is geographic: its raw grid is the globe, so the raw coords are the
+					// sample coords and the shader reads it through the unprojected lon/lat. A window map's
+					// cache is pixel space: sample at this pixel's unprojected coordinate, which is where the
+					// shader (pixel uv) expects it.
+					double sampleLon = rawLon, sampleLat = rawLat;
+					bool onMap = true;
 
-					if (body.pqsController != null && big_heightmap != null && lookAhead < mapheight && !lookAheadHidden)
+					if (!profile.GeographicCache)
 					{
-						if (big_heightmap[i, lookAhead] == 0f)
-						{
-							// The big map's cache (cache=true) is geographic: its raw grid is the globe, so the raw
-							// coords are the sample coords and the shader reads it through the unprojected lon/lat.
-							// A window map's cache is pixel space: sample at this pixel's unprojected coordinate,
-							// which is where the shader (pixel uv) expects it.
-							double sampleLon = lon, sampleLat = cacheLat;
-							bool onMap = true;
+						sampleLat = unprojectLatitude(rawLon, rawLat);
+						sampleLon = unprojectLongitude(rawLon, rawLat);
+						onMap = !(double.IsNaN(sampleLat) || double.IsNaN(sampleLon) || sampleLat < -90 || sampleLat > 90 || sampleLon < -180 || sampleLon > 180);
+					}
 
-							if (!profile.GeographicCache)
-							{
-								sampleLat = unprojectLatitude(lon, cacheLat);
-								sampleLon = unprojectLongitude(lon, cacheLat);
-								onMap = !(double.IsNaN(sampleLat) || double.IsNaN(sampleLon) || sampleLat < -90 || sampleLat > 90 || sampleLon < -180 || sampleLon > 180);
-							}
-
-							if (onMap)
-							{
-								// The prebuilt grid has every cell, so fill them all: the shader stencils by coverage
-								// anyway, and a map that is upsampled from this texture (the terrain overlay, 4 output
-								// pixels per texel) would otherwise blend real heights with the zeros of uncovered
-								// neighbours into dark fringes along every coverage edge. PQS is sampled for covered
-								// pixels only, as ever.
-								if (heightGridPass)
-									gridHeightToArray(i, lookAhead);   // one pixel per degree: the body's prebuilt height map, no PQS
-								else if (SCANUtil.isCovered(sampleLon, sampleLat, data, SCANtype.Altimetry))
-									terrainHeightToArray(sampleLon, sampleLat, i, lookAhead);
-							}
-						}
+					if (onMap)
+					{
+						// The prebuilt grid has every cell, so fill them all: the shader stencils by coverage
+						// anyway, and a map that is upsampled from this texture (the terrain overlay, 4 output
+						// pixels per texel) would otherwise blend real heights with the zeros of uncovered
+						// neighbours into dark fringes along every coverage edge. PQS is sampled for covered
+						// pixels only, as ever.
+						if (heightGridPass)
+							gridHeightToArray(i, row);   // one pixel per degree: the body's prebuilt height map, no PQS
+						else if (SCANUtil.isCovered(sampleLon, sampleLat, data, SCANtype.Altimetry))
+							terrainHeightToArray(sampleLon, sampleLat, i, row);
 					}
 				}
 
-				if (mapstep < 0)
+				if (!wantBiome)
 				{
 					continue;
 				}
 
-				if (mapHidden)
-				{
-					continue;
-				}
-
-				if (mType != mapType.Biome || !biomeMap || biomeRowDone)
-				{
-					continue;
-				}
-
-				double lat = (mapstep * 1.0f / mapscale) - 90f + lat_offset;
-				double la = lat, lo = lon;
-				lat = unprojectLatitude(lo, la);
-				lon = unprojectLongitude(lo, la);
+				double lat = unprojectLatitude(rawLon, rawLat);
+				double lon = unprojectLongitude(rawLon, rawLat);
 
 				if (double.IsNaN(lat) || double.IsNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180)
 				{
@@ -2303,9 +2287,6 @@ namespace SCANsat.SCAN_Map
 			long budget = claimBuildBudget();
 			bool elevDirty = false, biomeDirty = false, builtNow = false;
 
-			if (mapstep < -1)
-				mapstep = -1;   // the -2 step is the CPU path's resource cache build
-
 			if ((gpuNoData() || baseNone) && mapstep < mapheight)
 				mapstep = mapheight;   // nothing to build: the shader draws static, or only the resource layer (its cache is built lazily by the composite)
 
@@ -2323,7 +2304,7 @@ namespace SCANsat.SCAN_Map
 			// the window into the cache and fit the palette range to what is there - what the windows'
 			// calcTerrainLimits did synchronously before each reset, now under the budget. Rows start only
 			// once the range is final, so the first revealed row already has the right colours.
-			if (profile.AutoRange && pqs && mapstep <= -1 && (mType == mapType.Altimetry || mType == mapType.Biome))
+			if (profile.AutoRange && pqs && rangeRow < mapheight && (mType == mapType.Altimetry || mType == mapType.Biome))
 			{
 				while (rangeRow < mapheight)
 				{
@@ -2346,39 +2327,34 @@ namespace SCANsat.SCAN_Map
 				}
 			}
 
-			// At least one step per frame, however long it takes, then as many as fit the budget.
+			// At least one row per frame, however long it takes, then as many as fit the budget. Row
+			// mapstep is sampled and staged in the same step; the shader reads neighbouring rows itself.
 			while (mapstep < mapheight)
 			{
-				prepRow();   // at mapstep -1 this is the look-ahead that fills big_heightmap row 0
+				prepRow(mapstep);
 
-				if (mapstep >= 0)
+				// Biome: biomeIndex is this row's fresh lookup, or biome_indexmap already holds it.
+				if (mType == mapType.Biome && biome_indexmap != null)
 				{
-					// Altimetry/Slope: big_heightmap row mapstep+1 is the look-ahead just filled (row 0 came
-					// at mapstep -1, so stage both at mapstep 0). Biome: biomeIndex is the current row - or,
-					// for a cached row, biome_indexmap already holds it - plus the elevation rows for its underlay.
-					if (mType == mapType.Biome)
+					if (!biomeRowCached[mapstep])
 					{
-						if (biome_indexmap != null && !biomeRowCached[mapstep])
-						{
-							for (int bi = 0; bi < mapwidth; bi++)
-								biome_indexmap[bi, mapstep] = (float)biomeIndex[bi];
-							biomeRowCached[mapstep] = true;
-						}
-						ensureDataTex(ref biomeIndexTex);
-						stageDataRow(biomeIndexTex, biome_indexmap, mapstep);
-						biomeDirty = true;
+						for (int bi = 0; bi < mapwidth; bi++)
+							biome_indexmap[bi, mapstep] = (float)biomeIndex[bi];
+						biomeRowCached[mapstep] = true;
 					}
-					// Only a mode that samples elevation gets an elevation texture. A Biome map with no
-					// underlay (the small map, the biome planet overlay) staged a full row of zeros per row
-					// into an RFloat texture the shader never reads (_HasElevation 0) - 2 MB and a full
-					// Apply per build frame for the 1024x512 biome overlay.
-					if (big_heightmap != null)
-					{
-						ensureDataTex(ref elevationTex);
-						if (mapstep == 0) stageDataRow(elevationTex, big_heightmap, 0);
-						stageDataRow(elevationTex, big_heightmap, mapstep + 1);
-						elevDirty = true;
-					}
+					ensureDataTex(ref biomeIndexTex);
+					stageDataRow(biomeIndexTex, biome_indexmap, mapstep);
+					biomeDirty = true;
+				}
+				// Only a mode that samples elevation gets an elevation texture. A Biome map with no
+				// underlay (the small map, the biome planet overlay) staged a full row of zeros per row
+				// into an RFloat texture the shader never reads (_HasElevation 0) - 2 MB and a full
+				// Apply per build frame for the 1024x512 biome overlay.
+				if (big_heightmap != null)
+				{
+					ensureDataTex(ref elevationTex);
+					stageDataRow(elevationTex, big_heightmap, mapstep);
+					elevDirty = true;
 				}
 
 				mapstep++;
