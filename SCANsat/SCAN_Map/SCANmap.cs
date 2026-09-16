@@ -641,7 +641,7 @@ namespace SCANsat.SCAN_Map
 
 			// The GPU data cache just went away with those textures, so its bookkeeping must go too.
 			// bigmap/spotmap are STATIC: the SCANmap outlives this Destroy and gets reused next scene.
-			// Leaving gpuDataComplete/gpuDataHash set means resetMap's instant-recolour path matches on
+			// Leaving dataTexKey stamped means resetMap's instant-recolour path matches on
 			// the next open with the same body+mode+projection+zoom, skips the whole sample sweep, and
 			// re-Blits from biomeIndexTex/elevationTex that are now null - a blank map until you switch
 			// body (which changes the hash) and back.
@@ -700,20 +700,27 @@ namespace SCANsat.SCAN_Map
 		}
 
 		/// <summary>
-		/// Drop every "the GPU already has valid data" claim. Anything that destroys or reallocates the
-		/// data textures / CPU caches must call this, or resetMap will trust a cache that isn't there.
+		/// Drop the claims that say the GPU already holds usable work, without touching the work itself.
+		/// Anything that destroys or reallocates the data textures, the LUTs or the CPU caches behind
+		/// them must call this, or resetMap will trust a cache that isn't there.
+		///
+		/// The resource grid and its texture are deliberately NOT dropped here, and a new cache belongs
+		/// here only if its key cannot tell the difference. resourceGridKey says which FIELD was sampled
+		/// - body, resource, window, grid size, biome locks - and a reset or a resize changes none of
+		/// that, so a grid that still matches its key is still correct, and re-sampling it is the most
+		/// expensive thing a pass can do (see buildResourceCache). The callers that really do invalidate
+		/// the grid null resourceCache itself, which buildResourceCache catches by size.
 		/// </summary>
 		private void invalidateGpuDataCache()
 		{
-			gpuDataComplete = false;
-			gpuDataHash = 0;
+			dataTexKey.Invalidate();
 			gpuRendered = false;
 			gpuRecolorSweep = false;
-			resourceTexReady = false;
-			resourceCacheReady = false;
 			biomeLUTCount = 0;
-			biomeLUTBody = null;
-			paletteLUTHash = 0;
+			biomeLUTKey.Invalidate();
+			paletteLUTKey.Invalidate();
+			// Not a claim on anything, just this pass's memo of the resource key: the grid keeps its own.
+			resourceConfigKey = 0;
 		}
 
 		internal void centerAround(double lon, double lat)
@@ -835,8 +842,8 @@ namespace SCANsat.SCAN_Map
 			private Texture2D paletteLUT;
 			private Texture2D paletteGreyLUT;   // LoRes-only altimetry grey ramp
 			private Texture2D biomeLUT;         // stock biome mapColors
-			private int biomeLUTCount;
-			private CelestialBody biomeLUTBody;
+			private int biomeLUTCount;          // how many entries it holds; also the shader's _BiomeCount
+			private CacheKey biomeLUTKey;       // the body and biome count it was baked for
 			private float[,] biome_indexmap;
 			private bool[] biomeRowCached;   // biome_indexmap row y is fully sampled for the current body / size / projection
 			// Per-pass diagnostics, logged once when a GPU data pass completes.
@@ -846,14 +853,15 @@ namespace SCANsat.SCAN_Map
 			private float passBuildStart = -1f;
 			private float passBuildMs;
 			private Color[] gpuRowBuf;
-			private bool resourceTexReady;
-			private bool resourceCacheReady;   // resourceCache is built this reset (by the prep loop or the lazy GPU build)
-			private int resourceCacheHash;     // the config resourceCache was sampled for; 0 = nothing valid in it
-			private int resourceTexHash;       // the config resourceTex was uploaded from; 0 = nothing uploaded yet
-			private int paletteLUTHash;
-			private bool gpuDataComplete;   // the non-Visual data cache is fully sampled for gpuDataHash's config
-			private int gpuDataHash;        // config (body/mode/projection/size/offsets/coverage) the cached data is valid for
-			private int pendingDataHash;    // the config hash taken when the current build started; becomes gpuDataHash when it completes
+			private CacheKey resourceGridKey;   // the field resourceCache was sampled from
+			private CacheKey resourceTexKey;    // the grid resourceTex was uploaded from
+			private CacheKey paletteLUTKey;
+			private CacheKey dataTexKey;        // the pass config elevationTex / biomeIndexTex were fully sampled for
+			private int pendingDataKey;         // the key the build now in flight will stamp on dataTexKey when it finishes
+			// resourceConfigHash walks the body's biomes under BiomeLock and the composite runs every
+			// frame of the sweep, so the key is taken once a pass and both resource caches compare
+			// against that. 0 = not taken yet this pass.
+			private int resourceConfigKey;
 			private bool gpuRecolorSweep;   // cosmetic re-sweep in progress: re-Blit cached data with a new LUT (no re-sample)
 		// The GPU compositor draws the whole Visual map in one Blit; the scanline is a purely cosmetic
 		// reveal (in the CPU path's row order) so it matches the CPU modes' look. Visual and the
@@ -980,8 +988,7 @@ namespace SCANsat.SCAN_Map
 			passBuildFrames = 0;
 			passBuildStart = -1f;
 			passBuildMs = 0f;
-			resourceTexReady = false;
-			resourceCacheReady = false;
+			resourceConfigKey = 0;       // new pass: take the resource key again (the field may have changed under us)
 			coverageFlagsDirty = true;   // new pass: refresh the GPU coverage stencil once from live coverage
 			resourceActive = resourceOn;
 			heightGridPass = profile.HeightGrid && data != null && data.Built && mapwidth == 360 && mapheight == 180 && projection == MapProjection.Rectangular;
@@ -1041,18 +1048,19 @@ namespace SCANsat.SCAN_Map
 				// abundance grid on every reset. It keeps the grid now (resourceConfigHash decides when to
 				// re-sample), so a resource map takes this shortcut like any other: the composite's lazy
 				// buildResourceCache finds the grid it already has.
-				if (gpuDataComplete && gpuDataHash == configHash)
+				if (dataTexKey.Valid(configHash))
 				{
-					gpuRecolorSweep = true;    // gpuDataHash stays the build's: a recolour adds no samples, so it must not claim coverage that arrived during it
-					resourceTexReady = false;  // resource colours may have changed too
+					// dataTexKey stays the build's: a recolour adds no samples, so it must not claim
+					// coverage that arrived during it.
+					gpuRecolorSweep = true;
 				}
 				else
 				{
 					// A full data build starts now and overwrites the data textures row by row. Until it
-					// completes (buildSlice sets the flag again) they hold a mix of passes, so a reset in
+					// completes (buildSlice stamps the key again) they hold a mix of passes, so a reset in
 					// the meantime must not take the shortcut above.
-					gpuDataComplete = false;
-					pendingDataHash = configHash;
+					dataTexKey.Invalidate();
+					pendingDataKey = configHash;
 					mapstep = 0;
 				}
 			}
@@ -1553,8 +1561,14 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetFloat("_ResourceActive", resOn ? 1f : 0f);
 			if (resOn)
 			{
-				if (!resourceCacheReady) { buildResourceCache(); resourceCacheReady = true; }   // GPU paths skip the prep that builds it
-				if (!resourceTexReady) { uploadResourceTexture(); resourceTexReady = true; }
+				// Both caches are keyed, so calling them every frame of the sweep is a key compare and a
+				// return. The key itself is not free - under BiomeLock it walks the body's biomes - so it
+				// is taken once a pass and handed to both.
+				if (resourceConfigKey == 0)
+					resourceConfigKey = resourceConfigHash();
+
+				buildResourceCache(resourceConfigKey);
+				uploadResourceTexture();
 				compositeMaterial.SetTexture("_ResourceTex", resourceTex);
 				float minR = useCustomRange ? customResourceMin : resource.CurrentBody.MinValue;
 				float maxR = useCustomRange ? customResourceMax : resource.CurrentBody.MaxValue;
@@ -1566,26 +1580,75 @@ namespace SCANsat.SCAN_Map
 			}
 		}
 
+		/// <summary>
+		/// One piece of cached GPU work and the config key it was built for. Valid(key) answers "is what
+		/// I am holding still what you are asking for", Stamp(key) claims it once the work is done, and
+		/// Invalidate() drops the claim without touching the work itself. Key 0 means "nothing valid
+		/// here", so every key builder in this class ends with seal().
+		///
+		/// Not every cache here is one of these, and the two that are not are not oversights: the biome
+		/// row flags are per row and the elevation grid uses a per-cell "unsampled" sentinel, because
+		/// both are filled a row at a time and are useful half-built. These are all-or-nothing.
+		/// </summary>
+		private struct CacheKey
+		{
+			private int key;
+
+			/// <summary>The key this was stamped with; 0 when nothing valid is held.</summary>
+			internal int Key
+			{
+				get { return key; }
+			}
+
+			internal bool Valid(int wanted)
+			{
+				return key != 0 && key == wanted;
+			}
+
+			internal void Stamp(int wanted)
+			{
+				key = wanted;
+			}
+
+			internal void Invalidate()
+			{
+				key = 0;
+			}
+		}
+
+		// Every config key below is folded the same way, so that none of them is quietly weaker than its
+		// neighbours and a new one is written by copying an old one. seal keeps 0 for CacheKey's
+		// "nothing valid here", so a key that happens to fold to zero is nudged off it.
+		private static int mix(int h, int v)
+		{
+			return h * 31 + v;
+		}
+
+		private static int seal(int h)
+		{
+			return h == 0 ? 1 : h;
+		}
+
 		// Config key (body/mode/projection/size/offsets). If it matches the value cached when the data
 		// finished sampling, the change was colourisation-only (palette/clamp/terminator) and we can
 		// instant-recolour from the cached data textures instead of re-sweeping the whole map.
 		private int gpuConfigHash()
 		{
 			int h = body != null ? body.flightGlobalsIndex : -1;
-			h = h * 31 + (int)mType;
-			h = h * 31 + (int)projection;
-			h = h * 31 + mapwidth;
-			h = h * 31 + mapheight;
-			h = h * 31 + mapscale.GetHashCode();   // a window map's zoom level
-			h = h * 31 + lon_offset.GetHashCode();
-			h = h * 31 + lat_offset.GetHashCode();
-			h = h * 31 + centeredLat.GetHashCode();
-			h = h * 31 + centeredLong.GetHashCode();
+			h = mix(h, (int)mType);
+			h = mix(h, (int)projection);
+			h = mix(h, mapwidth);
+			h = mix(h, mapheight);
+			h = mix(h, mapscale.GetHashCode());   // a window map's zoom level
+			h = mix(h, lon_offset.GetHashCode());
+			h = mix(h, lat_offset.GetHashCode());
+			h = mix(h, centeredLat.GetHashCode());
+			h = mix(h, centeredLong.GetHashCode());
 			// Coverage growth (live scanning) must defeat the instant-recolour shortcut: the cached data
 			// textures hold no samples for newly covered pixels - they upload as 0 m, which the LoRes
 			// grey ramp draws nearly black. A real pass samples just the new pixels. 64,800 shorts, per reset.
-			h = h * 31 + coverageChecksum();
-			return h;
+			h = mix(h, coverageChecksum());
+			return seal(h);
 		}
 
 		/// <summary>
@@ -1597,22 +1660,22 @@ namespace SCANsat.SCAN_Map
 		private int resourceConfigHash()
 		{
 			int h = body != null ? body.flightGlobalsIndex : -1;
-			h = h * 31 + (resource != null && resource.Name != null ? resource.Name.GetHashCode() : 0);
-			h = h * 31 + (SCAN_Settings_Config.Instance.BiomeLock ? 1 : 0);   // ResourceOverlay's CheckForLock
-			h = h * 31 + (int)projection;                                     // Orthographic unprojects per cell
-			h = h * 31 + resourceMapWidth;
-			h = h * 31 + resourceMapHeight;
-			h = h * 31 + resourceInterpolation;
+			h = mix(h, resource != null && resource.Name != null ? resource.Name.GetHashCode() : 0);
+			h = mix(h, SCAN_Settings_Config.Instance.BiomeLock ? 1 : 0);   // ResourceOverlay's CheckForLock
+			h = mix(h, (int)projection);                                   // Orthographic unprojects per cell
+			h = mix(h, resourceMapWidth);
+			h = mix(h, resourceMapHeight);
+			h = mix(h, resourceInterpolation);
 			// A window map's grid covers its own window, not the globe: it re-samples when the window moves.
-			h = h * 31 + lon_offset.GetHashCode();
-			h = h * 31 + lat_offset.GetHashCode();
-			h = h * 31 + centeredLat.GetHashCode();
-			h = h * 31 + centeredLong.GetHashCode();
+			h = mix(h, lon_offset.GetHashCode());
+			h = mix(h, lat_offset.GetHashCode());
+			h = mix(h, centeredLat.GetHashCode());
+			h = mix(h, centeredLong.GetHashCode());
 			// The interpolated cells are noise: randomEdges picks the lerp per cell, the zoom map's hard
 			// edges mirror where a globe wraps, and the sequence is seeded from the save's resource seed.
-			h = h * 31 + (randomEdges ? 1 : 0);
-			h = h * 31 + (int)mSource;
-			h = h * 31 + (ResourceScenario.Instance != null ? ResourceScenario.Instance.gameSettings.Seed : 0);
+			h = mix(h, randomEdges ? 1 : 0);
+			h = mix(h, (int)mSource);
+			h = mix(h, ResourceScenario.Instance != null ? ResourceScenario.Instance.gameSettings.Seed : 0);
 
 			// The one part of the field that play can change. With the lock on, stock hands back the biome's
 			// average until a surface scan unlocks that biome, so landing a scanner has to re-sample - which
@@ -1629,11 +1692,11 @@ namespace SCANsat.SCAN_Map
 						continue;
 					}
 
-					h = h * 31 + (ResourceMap.Instance.IsBiomeUnlocked(body.flightGlobalsIndex, atts[i].name) ? i + 1 : 0);
+					h = mix(h, ResourceMap.Instance.IsBiomeUnlocked(body.flightGlobalsIndex, atts[i].name) ? i + 1 : 0);
 				}
 			}
 
-			return h == 0 ? 1 : h;   // 0 is reserved for "no grid"
+			return seal(h);
 		}
 
 		private int coverageChecksum()
@@ -1690,19 +1753,18 @@ namespace SCANsat.SCAN_Map
 			tex.SetPixels(0, row, mapwidth, 1, gpuRowBuf);
 		}
 
-		// Build resourceCache (stock abundance) - the GPU paths (Visual short-circuit, fake-sweep fast
-		// path) skip the prep loop that normally built it, so a pass's first composite calls this.
-		// Sampling is the most expensive thing left in a pass: the grid takes (2H/N)x(H/N) calls into
-		// stock GetAbundance, each carrying a biome-map lookup, so at the settings' ceiling (map height
-		// 1024, interpolation 2) it is 524,288 of them - about a second, in one frame, with no way to
-		// spend it under the build budget. Hence the config key: the grid outlives the reset that used to
-		// wipe it, and only a different body / resource / window / grid actually re-samples.
-		private void buildResourceCache()
+		// Build resourceCache (stock abundance). Nothing else builds it - a pass's first composite calls
+		// this, whatever the mode - so this is where the cost lives. Sampling is the most expensive thing
+		// left in a pass: the grid takes (2H/N)x(H/N) calls into stock GetAbundance, each carrying a
+		// biome-map lookup, so at the settings' ceiling (map height 1024, interpolation 2) it is 524,288
+		// of them - about a second, in one frame, with no way to spend it under the build budget. Hence
+		// the config key: the grid outlives the reset that used to wipe it, and only a different body /
+		// resource / window / grid actually re-samples. key is this pass's resourceConfigHash.
+		private void buildResourceCache(int key)
 		{
-			int hash = resourceConfigHash();
 			bool sized = resourceCache != null && resourceCache.GetLength(0) == resourceMapWidth && resourceCache.GetLength(1) == resourceMapHeight;
 
-			if (sized && resourceCacheHash == hash)
+			if (sized && resourceGridKey.Valid(key))
 			{
 				// The same field, already sampled. The auto-range fit is re-run because the windows' own UI
 				// (setCustomRange) may have overwritten the range since; interpolation never rewrites the
@@ -1726,7 +1788,7 @@ namespace SCANsat.SCAN_Map
 				System.Array.Clear(resourceCache, 0, resourceCache.Length);
 			}
 
-			resourceCacheHash = 0;   // a throw mid-build must not leave a half-sampled grid stamped valid
+			resourceGridKey.Invalidate();   // a throw mid-build must not leave a half-sampled grid stamped valid
 
 			SCANuiUtil.generateResourceCache(ref resourceCache, resourceMapHeight, resourceMapWidth, resourceInterpolation, resourceMapScale, this);
 			if (profile.AutoRange)
@@ -1739,7 +1801,7 @@ namespace SCANsat.SCAN_Map
 				SCANuiUtil.interpolate(resourceCache, resourceMapHeight, resourceMapWidth, i, 0, i, rr, randomEdges, profile.ResourceHardEdges);
 			}
 
-			resourceCacheHash = hash;
+			resourceGridKey.Stamp(key);
 		}
 
 		// Upload resourceCache (geographic resW x resH) as an R-float abundance texture (fraction 0..1).
@@ -1751,9 +1813,9 @@ namespace SCANsat.SCAN_Map
 				if (resourceTex != null) UnityEngine.Object.Destroy(resourceTex);
 				resourceTex = new Texture2D(resourceMapWidth, resourceMapHeight, TextureFormat.RFloat, false);
 				resourceTex.wrapMode = TextureWrapMode.Clamp;
-				resourceTexHash = 0;
+				resourceTexKey.Invalidate();
 			}
-			else if (resourceTexHash != 0 && resourceTexHash == resourceCacheHash)
+			else if (resourceTexKey.Valid(resourceGridKey.Key))
 			{
 				return;   // this texture already holds this grid
 			}
@@ -1771,7 +1833,9 @@ namespace SCANsat.SCAN_Map
 					raw[row + x] = resourceCache[x, y] / 100f;
 			}
 			resourceTex.Apply(false);
-			resourceTexHash = resourceCacheHash;
+			// Keyed by the grid, not by the pass: a grid that failed to finish sampling holds key 0, and
+			// stamping that here leaves the texture just as invalid as the grid behind it.
+			resourceTexKey.Stamp(resourceGridKey.Key);
 		}
 
 		// Bake heightToColor across [min, min+range] into a 1-D LUT so the shader is a plain fetch and
@@ -1781,7 +1845,10 @@ namespace SCANsat.SCAN_Map
 		{
 			if (body.BiomeMap == null) return;
 			int n = body.BiomeMap.Attributes.Length;
-			if (biomeLUT != null && biomeLUTCount == n && biomeLUTBody == body) return;
+			// The body index rather than the body itself: these maps are static and outlive a scene, so
+			// holding the CelestialBody here kept the last browsed body's object alive for the session.
+			int key = seal(mix(mix(0, body.flightGlobalsIndex), n));
+			if (biomeLUT != null && biomeLUTKey.Valid(key)) return;
 			if (biomeLUT != null) UnityEngine.Object.Destroy(biomeLUT);
 			int w = Mathf.Max(n, 1);
 			biomeLUT = new Texture2D(w, 1, TextureFormat.RGBA32, false);
@@ -1792,14 +1859,21 @@ namespace SCANsat.SCAN_Map
 			biomeLUT.SetPixels(c);
 			biomeLUT.Apply(false);
 			biomeLUTCount = n;
-			biomeLUTBody = body;
+			biomeLUTKey.Stamp(key);
 		}
 
 		private void buildPaletteLUT(float min, float range)
 		{
 			SCANterrainConfig tc = SCANUtil.getTerrainConfig(data);
-			int hash = tc.ColorPal.Hash ^ (colorMap ? 1 : 0) ^ min.GetHashCode() ^ range.GetHashCode() ^ (useCustomRange ? 2 : 0);
-			if (paletteLUT != null && paletteLUTHash == hash)
+			// Folded, not XOR-combined as this one used to be: XOR is order-free and the two flags below
+			// sit in the same low bits, so they could cancel against the palette's hash and hand back a
+			// LUT baked for the other colour mode.
+			int key = mix(0, tc.ColorPal.Hash);
+			key = mix(key, colorMap ? 1 : 0);
+			key = mix(key, min.GetHashCode());
+			key = mix(key, range.GetHashCode());
+			key = seal(mix(key, useCustomRange ? 1 : 0));
+			if (paletteLUT != null && paletteLUTKey.Valid(key))
 				return;
 			if (paletteLUT == null)
 			{
@@ -1827,7 +1901,7 @@ namespace SCANsat.SCAN_Map
 			paletteLUT.Apply(false);
 			paletteGreyLUT.SetPixels(grey);
 			paletteGreyLUT.Apply(false);
-			paletteLUTHash = hash;
+			paletteLUTKey.Stamp(key);
 		}
 
 		private void updateCoverageFlags()
@@ -1927,7 +2001,7 @@ namespace SCANsat.SCAN_Map
 			if (big_heightmap != null)
 				System.Array.Clear(big_heightmap, 0, big_heightmap.Length);
 			clearBiomeRowCache();
-			gpuDataComplete = false;
+			dataTexKey.Invalidate();
 		}
 
 		// One row of the auto-range pre-pass: every 4th pixel of row rangeRow, sampled at its unprojected
@@ -2327,8 +2401,7 @@ namespace SCANsat.SCAN_Map
 
 			if (mapstep >= mapheight)
 			{
-				gpuDataComplete = true;          // data cache fully sampled...
-				gpuDataHash = pendingDataHash;    // ...for the coverage this build started from (see resetMap)
+				dataTexKey.Stamp(pendingDataKey);   // fully sampled, for the coverage this build started from (see resetMap)
 				passBuildMs = (Time.realtimeSinceStartup - passBuildStart) * 1000f;
 			}
 
