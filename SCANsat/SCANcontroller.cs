@@ -1390,14 +1390,6 @@ namespace SCANsat
 			{
 				checkHeightMapStatus();
 			}
-
-			// Authoring tool: does nothing unless a SCANSAT_TERRAIN_SURVEY node asks for a run.
-			SCANterrainSurvey.CheckForRequest();
-
-			if (SCANterrainSurvey.Running)
-			{
-				SCANterrainSurvey.Pump();
-			}
 		}
 
 		private IEnumerator WaitForScienceUpdate()
@@ -1643,15 +1635,9 @@ namespace SCANsat
 			// SCANdata.generateHeightMap loads and unloads PQS with mapSource.Data whichever builder drives
 			// it, so a build the small map or the terrain overlay owned leaves data loaded with this
 			// controller's own build flag clear. dataBodies is what is actually loaded; unload all of it.
-			// A terrain survey holds one body across scenes on purpose and unloads it itself when that body
-			// is done, so skip that body alone - CurrentBody is null when no survey is running, and a full
-			// RSS survey takes minutes that the rest of the list should not stay loaded for.
 			for (int i = dataBodies.Count - 1; i >= 0; i--)
 			{
-				if (dataBodies[i] != SCANterrainSurvey.CurrentBody)
-				{
-					unloadPQS(dataBodies[i]);
-				}
+				unloadPQS(dataBodies[i]);
 			}
 
 			// GPU textures loaded for Visual maps are not scene-managed either.

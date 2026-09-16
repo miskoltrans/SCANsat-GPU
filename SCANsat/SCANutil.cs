@@ -357,9 +357,9 @@ namespace SCANsat
 			float newMin = SCANconfigLoader.SCANNode.DefaultMinHeightRange;
 			float newMax = SCANconfigLoader.SCANNode.DefaultMaxHeightRange;
 
-			// An authored SCANSAT_TERRAIN node wins outright: it is a measured range (see
-			// SCANterrainSurvey), where pqsController.radiusMin/Max below is only a guess - and for a
-			// Kopernicus body built from a template it is the template's guess, shared with its siblings.
+			// An authored SCANSAT_TERRAIN node wins outright: it is a range measured from the body's own
+			// terrain, where pqsController.radiusMin/Max below is only a guess - and for a Kopernicus body
+			// built from a template it is the template's guess, shared with every sibling.
 			if (authoredTerrainRange(b, ref newMin, ref newMax))
 			{
 				SCANlog("[{0}] terrain range authored: {1:F0} m to {2:F0} m", b.name, newMin, newMax);
