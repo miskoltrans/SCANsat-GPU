@@ -52,7 +52,7 @@ namespace SCANsat.SCAN_Map
 				if (!profile.GeographicCache && mapscale != value)
 					clearWindowCaches();   // pixel-space caches: a new zoom level is a new window
 				mapscale = value;
-				resourceMapScale = (mapwidth / resourceMapWidth) * mapscale;
+				resourceMapScale = mapscale * mapwidth / resourceMapWidth;
 			}
 		}
 
@@ -554,7 +554,7 @@ namespace SCANsat.SCAN_Map
 			resourceMapHeight = mapheight;
 			resourceCache = null;   // buildResourceCache sizes it when a resource layer is actually on
 			resourceInterpolation = interpolation;
-			resourceMapScale = resourceMapWidth / 360;
+			resourceMapScale = resourceMapWidth / 360f;
 			randomEdges = false;
 		}
 
