@@ -1707,7 +1707,7 @@ namespace SCANsat.SCAN_Map
 				// The same field, already sampled. The auto-range fit is re-run because the windows' own UI
 				// (setCustomRange) may have overwritten the range since; interpolation never rewrites the
 				// sampled cells that fit reads, so a reused grid fits to exactly what a fresh one would.
-				if (autoRange)
+				if (profile.AutoRange)
 					applyAutoResourceRange();
 
 				return;
