@@ -86,6 +86,9 @@ namespace SCANsat.SCAN_Unity
 		private Texture2D clearMap;
 		private Texture2D gridMap;   // the graticule for the UI's grid layer, rendered by SCANmap.renderGrid
 		private Vector2 gridPixelSize;   // the map's on-screen size the grid was last rendered for
+		private Vector2 gridPendingSize;   // the size seen last frame, waiting to hold still before a re-render
+		private int gridDeferredFrames;    // frames the layer has been clear waiting for that
+		private const int GridSettleLimit = 30;   // render anyway after this many, so a size that never quite stops moving still gets a grid
 		private bool clearMapSet;
 
 
@@ -578,16 +581,30 @@ namespace SCANsat.SCAN_Unity
 				return;
 			}
 
-			// The grid texture is rendered for the map's on-screen size; re-render when that changes
-			// (window resize, UI scale), checked every 16 frames - and every frame until the first
-			// layout pass has given the map image a size, so the grid appears crisp on that frame.
-			if (GridToggle && (gridPixelSize == Vector2.zero || (Time.frameCount & 15) == 0))
+			// The grid texture is rendered for the map's on-screen size, and renderGrid does a GPU
+			// readback, so it cannot run on every frame of a resize. Watch the size every frame instead
+			// - the check is two WorldToScreenPoint calls - and render once it has held still for a
+			// frame. The layer is cleared the moment the size stops matching what was rendered, so a
+			// grid built for one size is never stretched over another while the layout settles after an
+			// open or the window is being dragged.
+			if (GridToggle)
 			{
 				Vector2 px = uiElement.MapPixelSize();
 
 				if ((px - gridPixelSize).sqrMagnitude > 1f)
 				{
-					SetGridLines();
+					if (gridPixelSize != Vector2.zero)
+					{
+						gridPixelSize = Vector2.zero;
+						uiElement.UpdateGridTexture(clearMap);
+					}
+
+					if (px.x >= 2f && ((px - gridPendingSize).sqrMagnitude <= 1f || ++gridDeferredFrames > GridSettleLimit))
+					{
+						renderGridLines();
+					}
+
+					gridPendingSize = px;
 				}
 			}
 
@@ -1209,6 +1226,13 @@ namespace SCANsat.SCAN_Unity
 			eqMap.Apply();
 		}
 
+		/// <summary>
+		/// Invalidate the graticule: clear the layer and let Update render it once the map's on-screen
+		/// size has settled. Rendering here instead would use whatever size the layout happens to hold
+		/// at this instant, and every caller runs before that is final - the open at Startup, a
+		/// projection change, the grid toggle, a resize. At open that is the pre-layout size, and the
+		/// grid built for it was stretched across the map for the whole 0.3 s fade-in.
+		/// </summary>
 		private void SetGridLines()
 		{
 			if (uiElement == null)
@@ -1216,18 +1240,23 @@ namespace SCANsat.SCAN_Unity
 				return;
 			}
 
-			if (!GridToggle)
+			gridPixelSize = Vector2.zero;
+			gridPendingSize = new Vector2(-1f, -1f);   // no match next frame: one settle frame before the render
+			gridDeferredFrames = 0;
+			uiElement.UpdateGridTexture(clearMap);
+		}
+
+		// Same dotted graticule on the same UI layer as before (was the CPU GenerateGridMap), but
+		// rendered at the map's on-screen pixel size, so a dot is one screen pixel whatever the window
+		// size and UI scale instead of a map texel resampled by the UI. Only Update calls this, and only
+		// once the size has stopped moving.
+		private void renderGridLines()
+		{
+			if (uiElement == null || bigmap == null)
 			{
-				uiElement.UpdateGridTexture(clearMap);
 				return;
 			}
 
-			// Same dotted graticule on the same UI layer as before (was the CPU GenerateGridMap), but
-			// rendered at the map's on-screen pixel size, so a dot is one screen pixel whatever the window
-			// size and UI scale instead of a map texel resampled by the UI. Before the first layout pass
-			// the rect is empty: show nothing until Update sees the real size (it checks every frame
-			// until then). A grid rendered at the map's own size and stretched by the UI in the
-			// meantime showed as bright blotches at the map's corners for the first frames of every open.
 			Vector2 px = uiElement.MapPixelSize();
 
 			if (px.x < 2f)
@@ -1240,6 +1269,7 @@ namespace SCANsat.SCAN_Unity
 			int w = Mathf.Clamp(Mathf.RoundToInt(px.x), 2, 8192);
 			int h = Mathf.Max(1, Mathf.RoundToInt(w * (float)bigmap.MapHeight / bigmap.MapWidth));
 			gridPixelSize = px;
+			gridDeferredFrames = 0;
 			gridMap = bigmap.renderGrid(gridMap, w, h);
 			uiElement.UpdateGridTexture(gridMap != null ? gridMap : clearMap);
 		}
