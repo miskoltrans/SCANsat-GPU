@@ -849,7 +849,6 @@ namespace SCANsat.SCAN_UI
 			if (map == null)
 			{
 				map = new SCANmap(orbitingBody, mapSource.RPM);
-				map.AutoRange = true;   // palette range fitted to the window by the map's own pre-pass (was calcTerrainLimits here)
 				map.ColorMap = persist.RPMColor;
 				map.setProjection(MapProjection.Rectangular);
 			}

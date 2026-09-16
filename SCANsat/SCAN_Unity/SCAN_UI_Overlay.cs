@@ -968,9 +968,6 @@ namespace SCANsat.SCAN_Unity
 			{
 				overlayMap = new SCANmap(body, mapSource.Overlay);
 				overlayMap.setProjection(MapProjection.Rectangular);
-				overlayMap.SweepEnabled = false;    // no reveal: the texture is handed over when the build completes
-				overlayMap.BiomeUnderlay = false;   // the biome overlay is flat stock colours
-				overlayMap.PlanetUV = true;         // columns in the planet's UV layout, as the CPU overlays wrote them (fixLon)
 				// No reset here: buildOverlay resets with the real mode straight after this returns. The
 				// reset setWidth used to do ran with the previous selection's mType, and the overlay's
 				// three widths meant a build reset twice every time the selection changed.

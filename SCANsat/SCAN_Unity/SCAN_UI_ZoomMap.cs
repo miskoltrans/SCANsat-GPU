@@ -253,7 +253,6 @@ namespace SCANsat.SCAN_Unity
 			if (spotmap == null)
 			{
 				spotmap = new SCANmap(body, mapSource.ZoomMap);
-				spotmap.AutoRange = true;   // palette range fitted to the window by the map's own pre-pass (was calcTerrainLimits here)
 
 				mapType t = mapType.Altimetry;
 
