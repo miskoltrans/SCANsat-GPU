@@ -448,30 +448,46 @@ Shader "Hidden/SCANsat/VisualComposite"
 					}
 					else if (covHas(cov, 0.0) || covHas(cov, 1.0))
 					{
-						// Gradient from the neighbour elevation texels, in the CPU renderer's unit: metres of
-						// rise per degree of arc, over 1000, clamped to 0..2 (the body's radius never enters;
-						// a texel is 1/_MapScale degrees whatever the map's size or zoom). The CPU compared a
-						// pixel with the highest of three in the row above; this takes the largest one-sided
-						// difference in the four directions, so it won't match pixel-for-pixel by design.
-						// A neighbour texel at exactly 0 was never sampled (uncovered cells stay 0 on the PQS
-						// path; a true 0 m is stored as -0.001) and is skipped, or every coverage edge would
-						// read as a cliff down to 0 m. Where a texel column is a line of longitude (any
-						// geographic cache, or a rectangular window map) its run shrinks by cos(lat), as
-						// SCANUtil.slope's latOffset does.
+						// The elevation gradient over ONE MAP TEXEL OF ARC in every direction, at every
+						// latitude. A texel column is a meridian on a geographic texture and on a rectangular
+						// window (RPM), so along a row the texels close up by cos(lat) toward the poles: the
+						// east and west samples are taken 1/cos(lat) texels out, which keeps them one texel of
+						// ground apart, and nothing is divided by cos(lat). (The old lonRun did divide by it,
+						// and turned the polar rows into cliffs: at 89 degrees on a 1440-wide map of Earth the
+						// neighbouring texels are 500 m apart, and real relief over 500 m is steep at the
+						// map's scale.) The zoom map is Orthographic in pixel space, where a pixel step is one
+						// ground step already. Central differences and the gradient magnitude, so a slope
+						// reads the same whichever way it faces, in the CPU renderer's unit: metres of rise
+						// per degree of arc, over 1000, clamped to 0..2 (getPartialMap's |dh| / (1000 / mapscale);
+						// a texel is 1/_MapScale degrees whatever the map's size or zoom, and the body's radius
+						// never enters). A neighbour at exactly 0 was never sampled (uncovered cells stay 0 on
+						// the PQS path; a true 0 m is stored as -0.001) and drops out, leaving a one-sided
+						// difference, so a coverage edge is not a cliff down to 0 m. The widened step wraps at
+						// the dateline on a geographic texture (frac) and clamps at a window's edge (the
+						// texture's wrap mode); it is capped at half the texture, so the last texel beside a
+						// pole, where 1/cos(lat) explodes, reads its north-south slope only.
 						float2 tx = float2(1.0 / _MapWidth, 1.0 / _MapHeight);
+						float meridians = (_PixelSpace < 0.5 || _Projection < 0.5) ? 1.0 : 0.0;
+						float su = meridians > 0.5 ? min(tx.x / max(cos(lat * DEG2RAD), 0.000001), 0.5) : tx.x;
+						float uE = dUV.x + su;
+						float uW = dUV.x - su;
+						if (_PixelSpace < 0.5)
+						{
+							uE = frac(uE);
+							uW = frac(uW);
+						}
 						float e  = tex2D(_ElevationTex, dUV).r;
-						float eR = tex2D(_ElevationTex, dUV + float2(tx.x, 0)).r;
-						float eL = tex2D(_ElevationTex, dUV - float2(tx.x, 0)).r;
-						float eU = tex2D(_ElevationTex, dUV + float2(0, tx.y)).r;
-						float eD = tex2D(_ElevationTex, dUV - float2(0, tx.y)).r;
-						float dR = abs(eR) > 0.0 ? abs(e - eR) : 0.0;
-						float dL = abs(eL) > 0.0 ? abs(e - eL) : 0.0;
-						float dU = abs(eU) > 0.0 ? abs(e - eU) : 0.0;
-						float dD = abs(eD) > 0.0 ? abs(e - eD) : 0.0;
-						float lonRun = (_PixelSpace < 0.5 || _Projection < 0.5) ? max(cos(lat * DEG2RAD), 0.05) : 1.0;
-						float dx = max(dR, dL) / lonRun;
-						float dy = max(dU, dD);
-						float v = min(max(dx, dy) / (1000.0 / _MapScale), 2.0);
+						float eE = tex2D(_ElevationTex, float2(uE, dUV.y)).r;
+						float eW = tex2D(_ElevationTex, float2(uW, dUV.y)).r;
+						float eN = tex2D(_ElevationTex, dUV + float2(0, tx.y)).r;
+						float eS = tex2D(_ElevationTex, dUV - float2(0, tx.y)).r;
+						float hasE = abs(eE) > 0.0 ? 1.0 : 0.0;
+						float hasW = abs(eW) > 0.0 ? 1.0 : 0.0;
+						float hasN = abs(eN) > 0.0 ? 1.0 : 0.0;
+						float hasS = abs(eS) > 0.0 ? 1.0 : 0.0;
+						float dx = hasE * hasW > 0.5 ? (eE - eW) * 0.5 : (hasE > 0.5 ? eE - e : (hasW > 0.5 ? e - eW : 0.0));
+						float dy = hasN * hasS > 0.5 ? (eN - eS) * 0.5 : (hasN > 0.5 ? eN - e : (hasS > 0.5 ? e - eS : 0.0));
+						float v = min(sqrt(dx * dx + dy * dy) / (1000.0 / _MapScale), 2.0);
 						if (_ColorMode <= 0.5)
 						{
 							// Greyscale (SCANmap.getPartialMap: palette.lerp(Black, White, v / 2)). The
