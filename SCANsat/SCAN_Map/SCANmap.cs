@@ -1128,9 +1128,9 @@ namespace SCANsat.SCAN_Map
 			return Mathf.Max(1, Mathf.CeilToInt((float)(mapscale * 360.0)));
 		}
 
-		// True when the GPU compositor is expected to render this map, so the readable CPU copy
-		// can be skipped. Mirrors tryRenderVisualGPU's eligibility: Visual mode, resource overlay
-		// off, composite shader present, and the body's ScaledSpace source textures ready.
+		// True when the GPU compositor can render this map at all: the composite shader loaded, the map
+		// has a body and data, and either Visual maps are switched on or the mode is one of the data
+		// modes with a size. getPartialMap draws nothing when this is false.
 		private bool willRenderGPU(mapType m)
 		{
 			if (SCAN_UI_Loader.VisualCompositeShader == null || body == null || data == null || SCANcontroller.controller == null)
@@ -1223,9 +1223,10 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetFloat("_SunLatCenter", (float)sunLatCenter);
 			compositeMaterial.SetFloat("_Gamma", (float)gamma);
 
-			// Data-texture addressing and the classic-renderer details the shader reproduces. cache=true
-			// is the big map: its elevation cache is geographic over the globe. cache=false is a window
-			// map (zoom, RPM, the small map's helper): pixel-space caches filled per rendered pixel. The
+			// Data-texture addressing and the classic-renderer details the shader reproduces. A source
+			// with GeographicCache (the big map, the planet overlay) caches elevation over the globe, so
+			// the shader reads it through the unprojected lon/lat; every other source caches its own
+			// window in pixel space, filled per rendered pixel, and the shader reads it by pixel uv. The
 			// resource cache is pixel space whenever generateResourceCache ran over the map's raw window
 			// (it unprojects for Orthographic, and a window map's raw window is not the globe).
 			compositeMaterial.SetFloat("_ElevPixelSpace", profile.GeographicCache ? 0f : 1f);
@@ -1994,8 +1995,8 @@ namespace SCANsat.SCAN_Map
 				System.Array.Clear(biomeRowCached, 0, biomeRowCached.Length);
 		}
 
-		// A window map's (cache=false) elevation and biome caches are in pixel space, valid for one
-		// window: body, size, projection, centre and zoom. Any of those changing drops them.
+		// A window map's elevation and biome caches (no GeographicCache) are in pixel space, valid for
+		// one window: body, size, projection, centre and zoom. Any of those changing drops them.
 		private void clearWindowCaches()
 		{
 			if (big_heightmap != null)
