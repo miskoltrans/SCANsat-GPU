@@ -387,9 +387,10 @@ namespace SCANsat
 				}
 				catch (Exception e)
 				{
-					SCANlog($"[{b.name}] terrain range unavailable ({e.Message}); using the default range");
+					SCANlog($"[{b.name}] terrain range unavailable ({e.Message}); removing terrain reference.");
 					newMin = SCANconfigLoader.SCANNode.DefaultMinHeightRange;
 					newMax = SCANconfigLoader.SCANNode.DefaultMaxHeightRange;
+					b.pqsController = null;  // Remove the reference so SCANsat doesn't use altimetry (gas giant flat / invalid)
 				}
 			}
 
