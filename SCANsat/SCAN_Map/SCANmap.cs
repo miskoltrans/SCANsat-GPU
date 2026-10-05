@@ -1196,8 +1196,7 @@ namespace SCANsat.SCAN_Map
 		{
 			Shader shader = SCAN_UI_Loader.VisualCompositeShader;
 
-			// (source material / useMaterial flag are for a later gas-giant/Parallax pass)
-			SCANcontroller.controller.getVisualSource(body, visualTargetWidth(), out Texture colorTex, out Texture normalTex, out int normalYChannel, out _);
+			SCANcontroller.controller.getVisualSource(body, visualTargetWidth(), out Texture colorTex, out Texture normalTex, out int normalYChannel, out Texture gasRamp, out _);
 
 			if (compositeMaterial == null || compositeMaterial.shader != shader)
 				compositeMaterial = new Material(shader);
@@ -1206,6 +1205,7 @@ namespace SCANsat.SCAN_Map
 
 			compositeMaterial.SetTexture("_ScaledColor", colorTex);
 			compositeMaterial.SetTexture("_ScaledNormal", normalTex);
+			compositeMaterial.SetTexture("_GasRamp", gasRamp);
 			compositeMaterial.SetTexture("_CoverageFlags", coverageFlags);
 
 			compositeMaterial.SetFloat("_MapWidth", mapwidth);
@@ -1219,6 +1219,9 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetFloat("_ColorMode", colorMap ? 1f : 0f);
 			compositeMaterial.SetFloat("_HasNormal", normalTex != null ? 1f : 0f);
 			compositeMaterial.SetFloat("_NormalYChannel", normalYChannel);
+			// A gas giant hands over a cloud pattern rather than a colour map; the shader colours it
+			// through the body's own gradient (SCANcontroller.GetVisualMapTexturesForBody).
+			compositeMaterial.SetFloat("_GasGiant", gasRamp != null ? 1f : 0f);
 			compositeMaterial.SetFloat("_Terminator", terminator ? 1f : 0f);
 			compositeMaterial.SetFloat("_SunLonCenter", (float)sunLonCenter);
 			compositeMaterial.SetFloat("_SunLatCenter", (float)sunLatCenter);
@@ -1476,7 +1479,7 @@ namespace SCANsat.SCAN_Map
 			int h = Mathf.Max(1, Mathf.RoundToInt((float)(mapheight * k)));
 			int sourceWidth = Mathf.CeilToInt((float)(mapscale * k * 360.0));
 
-			if (!SCANcontroller.controller.getVisualSource(body, sourceWidth, out Texture colorTex, out Texture normalTex, out int normalYChannel, out _))
+			if (!SCANcontroller.controller.getVisualSource(body, sourceWidth, out Texture colorTex, out Texture normalTex, out int normalYChannel, out Texture gasRamp, out _))
 			{
 				return null;
 			}
@@ -1490,8 +1493,10 @@ namespace SCANsat.SCAN_Map
 			// all of them, so nothing here needs restoring.
 			compositeMaterial.SetTexture("_ScaledColor", colorTex);
 			compositeMaterial.SetTexture("_ScaledNormal", normalTex);
+			compositeMaterial.SetTexture("_GasRamp", gasRamp);
 			compositeMaterial.SetFloat("_HasNormal", normalTex != null ? 1f : 0f);
 			compositeMaterial.SetFloat("_NormalYChannel", normalYChannel);
+			compositeMaterial.SetFloat("_GasGiant", gasRamp != null ? 1f : 0f);
 			setFramingUniforms(w, h, mapscale * k);
 
 			Graphics.Blit(null, rt, compositeMaterial);

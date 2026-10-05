@@ -602,13 +602,13 @@ namespace SCANsat
 		// GPU) with no readable CPU copy - for the GPU Visual-map compositor (SCANmap). Returns
 		// false if the material/texture isn't ready (e.g. a 1x1 on-demand placeholder), so the
 		// caller retries once loadOnDemandScaledSpace has run.
-		internal bool getScaledSpaceSource(CelestialBody b, out Texture colorTex, out Texture normalTex, out Material material, out bool useMaterialForColor)
+		internal bool getScaledSpaceSource(CelestialBody b, out Texture colorTex, out Texture normalTex, out Material material, out Texture gasRamp)
 		{
 			colorTex = null;
 			normalTex = null;
-			useMaterialForColor = false;
+			gasRamp = null;
 
-			GetVisualMapTexturesForBody(b, out material, out useMaterialForColor, out string colorMapTextureName, out string normalMapTextureName);
+			GetVisualMapTexturesForBody(b, out material, out string gasRampTextureName, out string colorMapTextureName, out string normalMapTextureName);
 
 			if (material == null)
 				return false;
@@ -618,6 +618,11 @@ namespace SCANsat
 
 			if (normalMapTextureName != null)
 				normalTex = material.GetTexture(normalMapTextureName);
+
+			// Non-null only for a gas giant, whose "colour map" is a cloud pattern (see
+			// GetVisualMapTexturesForBody): the gradient the composite looks that pattern up in.
+			if (gasRampTextureName != null)
+				gasRamp = material.GetTexture(gasRampTextureName);
 
 			if (colorTex == null || colorTex.width <= 1 || colorTex.height <= 1)
 				return false;
@@ -632,11 +637,12 @@ namespace SCANsat
 		/// ScaledSpace textures, which must already be resident (see getScaledSpaceSource) - or are
 		/// paged in here when a cfg the OnDemand paths trusted turns out not to load (see cfgFallback).
 		/// </summary>
-		internal bool getVisualSource(CelestialBody b, int targetWidth, out Texture colorTex, out Texture normalTex, out int normalYChannel, out bool fromConfig)
+		internal bool getVisualSource(CelestialBody b, int targetWidth, out Texture colorTex, out Texture normalTex, out int normalYChannel, out Texture gasRamp, out bool fromConfig)
 		{
 			colorTex = null;
 			normalTex = null;
 			normalYChannel = 0;
+			gasRamp = null;
 			fromConfig = false;
 
 			if (b == null)
@@ -655,15 +661,16 @@ namespace SCANsat
 				return true;
 			}
 
-			if (!getScaledSpaceSource(b, out colorTex, out normalTex, out _, out _))
+			if (!getScaledSpaceSource(b, out colorTex, out normalTex, out _, out gasRamp))
 			{
 				// A cfg body whose colour map would not load: OnDemand was told to skip it back in
 				// setBody, before the load could fail, so its own textures are not resident. Page them
 				// in here and take them instead of showing nothing.
-				if (!cfgFallback(b, t) || !getScaledSpaceSource(b, out colorTex, out normalTex, out _, out _))
+				if (!cfgFallback(b, t) || !getScaledSpaceSource(b, out colorTex, out normalTex, out _, out gasRamp))
 				{
 					colorTex = null;   // never hand back OnDemand's 1x1 placeholder (getScaledSpaceSource assigns it before rejecting it)
 					normalTex = null;
+					gasRamp = null;
 					return false;
 				}
 			}
@@ -2085,12 +2092,12 @@ namespace SCANsat
 
 		}
 
-		void GetVisualMapTexturesForBody(CelestialBody b, out Material material, out bool useMaterialForColorMap, out string colorMapTextureName, out string normalMapTextureName)
+		void GetVisualMapTexturesForBody(CelestialBody b, out Material material, out string gasRampTextureName, out string colorMapTextureName, out string normalMapTextureName)
 		{
 			material = null;
 			colorMapTextureName = null;
 			normalMapTextureName = null;
-			useMaterialForColorMap = true;
+			gasRampTextureName = null;
 
 			if (b.scaledBody == null)
 			{
@@ -2107,17 +2114,28 @@ namespace SCANsat
 			material = scaledMesh.sharedMaterial; // TODO: what if there are multiple materials?  do we need to check all of them?
 			string shaderName = material.shader.name;
 
-			if (shaderName == "Terrain/Gas Giant")
+			// A gas giant (Terrain/Gas Giant: Jool and everything templated on it) has no colour map to
+			// read. KSP builds its colour by looking a cloud PATTERN up in a 1-D gradient - Jool's
+			// _CloudColorMap is a 2x4096 ramp of greens - and both patterns are masks: _CloudPatternTexture
+			// keeps one cloud layer in red and another in green, _DetailCloudPatternTexture is a
+			// single-channel BC4 detail that the shader TILES. Drawing a pattern as if it were a colour
+			// map is what made Jool's Visual map come out red. Hand the composite the un-tiled pattern
+			// plus the ramp instead and let it do the lookup (SCANVisualComposite's _GasGiant branch).
+			// Decided by what the material actually has, not by the shader's name, so a stripped or
+			// re-shadered gas giant (Kopernicus, planet packs) is judged on its own textures; KSP's
+			// low-quality gas giant material has a real _MainTex and falls through to the checks below.
+			if (material.HasProperty("_CloudPatternTexture") && material.HasProperty("_CloudColorMap")
+				&& material.GetTexture("_CloudPatternTexture") != null && material.GetTexture("_CloudColorMap") != null)
 			{
-				colorMapTextureName = "_DetailCloudPatternTexture";
-				normalMapTextureName = "_NormalMap";
+				colorMapTextureName = "_CloudPatternTexture";
+				gasRampTextureName = "_CloudColorMap";
+				normalMapTextureName = material.HasProperty("_NormalMap") ? "_NormalMap" : null;
 				return;
 			}
 			// HapkeScaled is Sol's Parallax-dependent scaled shader (from the simplify_map_drawing branch).
 			else if (shaderName.Contains("ParallaxScaled") || shaderName.Contains("HapkeScaled"))
 			{
 				SCANparallaxContinued.LoadParallax(b, ref material);
-				useMaterialForColorMap = false;
 				colorMapTextureName = "_ColorMap";
 				// Parallax normal maps are BC5 (Y in green). The shader selects the channel by format
 				// (_NormalYChannel); that is what the old "doesn't work with parallax" note was about.

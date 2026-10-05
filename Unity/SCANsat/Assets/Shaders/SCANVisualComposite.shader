@@ -26,6 +26,8 @@ Shader "Hidden/SCANsat/VisualComposite"
 		_ScaledColor ("Scaled Color", 2D) = "gray" {}
 		_ScaledNormal ("Scaled Normal", 2D) = "bump" {}
 		_NormalYChannel ("Normal Y channel (0 = blue, 1 = green)", Float) = 0
+		_GasRamp ("Gas Giant Colour Ramp", 2D) = "gray" {}
+		_GasGiant ("Scaled Color Is A Cloud Pattern", Float) = 0
 		_CoverageFlags ("Coverage Flags", 2D) = "black" {}
 		_ElevationTex ("Elevation", 2D) = "black" {}
 		_BiomeIndexTex ("Biome Index", 2D) = "black" {}
@@ -61,6 +63,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 
 			sampler2D _ScaledColor;
 			sampler2D _ScaledNormal;
+			sampler2D _GasRamp;         // 1-D (2xN) colour gradient a gas giant's cloud pattern is looked up in
 			sampler2D _CoverageFlags;   // 360x180, point-sampled. R=low byte, G=high byte of SCANdata.coverage Int16
 			sampler2D _ElevationTex;    // mapW x mapH, R = raw elevation (metres); from big_heightmap. Addressed per _PixelSpace
 			sampler2D _BiomeIndexTex;   // mapW x mapH, R = biome index fraction [0,1]; from biome_indexmap. Addressed per _PixelSpace
@@ -85,6 +88,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 			float _ColorMode;       // 1 colour, 0 grayscale
 			float _HasNormal;       // 1 if a normal map is bound
 			float _NormalYChannel;  // 1: Y in green (DXT5nm, BC5); 0: Y in blue (uncompressed RGB normals)
+			float _GasGiant;        // 1: _ScaledColor is a cloud pattern, not a colour map (see gasColor)
 
 			// Altimetry / Slope
 			float _TerrainMin;      // LUT domain min (metres)
@@ -264,6 +268,21 @@ Shader "Hidden/SCANsat/VisualComposite"
 				float q = hsl.z < 0.5 ? hsl.z * (1.0 + hsl.y) : hsl.z + hsl.y - hsl.z * hsl.y;
 				float p = 2.0 * hsl.z - q;
 				return float3(hue2rgb(p, q, hsl.x + 1.0 / 3.0), hue2rgb(p, q, hsl.x), hue2rgb(p, q, hsl.x - 1.0 / 3.0));
+			}
+
+			// A gas giant has no colour map: KSP's Terrain/Gas Giant builds the body's colour by looking a
+			// cloud PATTERN up in a 1-D gradient (Jool's _CloudColorMap is a 2x4096 ramp of greens), and
+			// the pattern is a mask with the cloud layers in red and green and nothing in blue - drawn as a
+			// colour it is pure red, which is what Jool's Visual map used to be. _ScaledColor holds that
+			// pattern for such a body (SCANcontroller.GetVisualMapTexturesForBody) and the lookup happens
+			// here. Explicit LOD: the ramp is a gradient, its mip chain is of no use, and this is called
+			// from inside the coverage branches where derivatives are not to be relied on.
+			float3 gasColor(float3 pattern)
+			{
+				float3 c = pattern;
+				if (_GasGiant > 0.5)
+					c = tex2Dlod(_GasRamp, float4(0.5, pattern.r, 0.0, 0.0)).rgb;
+				return c;
 			}
 
 			// Which channel of the normal map holds Y depends on its format (DXT5nm and BC5 keep it in
@@ -546,6 +565,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 					if (visHi)
 					{
 						col = tex2Dgrad(_ScaledColor, visUV, visDX, visDY);
+						col.rgb = gasColor(col.rgb);
 						if (_ColorMode > 0.5)
 						{
 							if (_HasNormal > 0.5)
@@ -563,6 +583,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 						// The floor() step makes the derivative spike at every block edge, which would pick a
 						// coarse mip there. Level 0 is what the CPU did (GetPixelBilinear on the base level).
 						col = tex2Dlod(_ScaledColor, float4(q, 0.0, 0.0));
+						col.rgb = gasColor(col.rgb);
 						if (_ColorMode <= 0.5)
 							col.rgb = grayscale(col.rgb);
 						col.a = 1.0;
