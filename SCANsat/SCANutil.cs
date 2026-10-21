@@ -308,12 +308,79 @@ namespace SCANsat
 			{
 				if (body.pqsController.radiusMin == body.pqsController.radiusMax)
 				{
+					// EXPERIMENT: Mirage displaces vertices but declares no PQS bounds, so its bodies read flat.
+					if (mirageTerrainMod(body) != null)
+					{
+						return true;
+					}
+
 					SCANlog($"[WARNING] [{body.name}] PQS controller is perfectly flat; assume this is erroneous and treat as missing data.");
 					return false;
 				}
 				return true;
 			}
 			return false;
+		}
+
+		// Mirage (Sol's GPU terrain) adds offset + deformity * height in its own PQSMod and declares no
+		// GetVertexMaxHeight/MinHeight, so radiusMin == radiusMax on a body that is not flat. Found by type
+		// name: SCANsat takes no reference to Mirage.dll.
+		private const string MirageTerrainModType = "PQSMod_MirageTerrain";
+		private static readonly Dictionary<string, PQSMod> mirageTerrainMods = new Dictionary<string, PQSMod>();
+
+		/// <summary>
+		/// The body's enabled Mirage terrain PQSMod, or null when Mirage does not displace this body.
+		/// </summary>
+		internal static PQSMod mirageTerrainMod(CelestialBody body)
+		{
+			if (body == null || body.pqsController == null)
+			{
+				return null;
+			}
+
+			if (mirageTerrainMods.TryGetValue(body.bodyName, out PQSMod cached))
+			{
+				return cached;
+			}
+
+			PQSMod found = null;
+			foreach (PQSMod mod in body.pqsController.GetComponentsInChildren<PQSMod>(true))
+			{
+				if (mod != null && mod.modEnabled && mod.GetType().Name == MirageTerrainModType)
+				{
+					found = mod;
+					break;
+				}
+			}
+
+			mirageTerrainMods[body.bodyName] = found;
+			return found;
+		}
+
+		/// <summary>
+		/// The height span Mirage can produce on this body, offset to offset + deformity, in metres.
+		/// </summary>
+		internal static bool mirageHeightRange(CelestialBody body, out double min, out double max)
+		{
+			min = max = 0;
+			PQSMod mod = mirageTerrainMod(body);
+			if (mod == null)
+			{
+				return false;
+			}
+
+			System.Reflection.FieldInfo deformity = mod.GetType().GetField("deformity");
+			System.Reflection.FieldInfo offset = mod.GetType().GetField("offset");
+			if (deformity == null || offset == null)
+			{
+				return false;
+			}
+
+			double d = Convert.ToDouble(deformity.GetValue(mod));
+			double o = Convert.ToDouble(offset.GetValue(mod));
+			min = Math.Min(o, o + d);
+			max = Math.Max(o, o + d);
+			return true;
 		}
 
 		/// <summary>
@@ -389,7 +456,14 @@ namespace SCANsat
 				return authored;
 			}
 
-			if (b.pqsController == null)
+			if (mirageHeightRange(b, out double mirageMin, out double mirageMax))
+			{
+				// EXPERIMENT: the PQS bounds are empty under Mirage; its PQSMod knows the span it can produce.
+				newMin = ((float)mirageMin).Mathf_Round(-1);
+				newMax = ((float)mirageMax).Mathf_Round(-1);
+				SCANlog("[{0}] terrain range from Mirage PQSMod: {1:F0} m to {2:F0} m", b.name, newMin, newMax);
+			}
+			else if (b.pqsController == null)
 			{
 				// Gas giants and other PQS-less bodies: nothing to measure, defaults apply (logged below).
 			}
