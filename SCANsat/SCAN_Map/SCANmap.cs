@@ -1206,11 +1206,17 @@ namespace SCANsat.SCAN_Map
 		{
 			Shader shader = SCAN_UI_Loader.VisualCompositeShader;
 
-			SCANcontroller.controller.getVisualSource(body, visualTargetWidth(), out Texture colorTex, out Texture normalTex, out int normalYChannel, out Texture gasRamp, out _);
-
 			if (compositeMaterial == null || compositeMaterial.shader != shader)
 			{
 				compositeMaterial = new Material(shader);
+			}
+
+			Texture colorTex = null, normalTex = null, gasRamp = null;
+			int normalYChannel = 0;
+			bool mirage = bindMirage(visualTargetWidth(), false, out bool mirageLoading);
+			if (!mirage)
+			{
+				SCANcontroller.controller.getVisualSource(body, visualTargetWidth(), out colorTex, out normalTex, out normalYChannel, out gasRamp, out _);
 			}
 
 			updateCoverageFlags();
@@ -1250,7 +1256,7 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetFloat("_RowMax", stopLine);
 			compositeMaterial.SetFloat("_Grid", profile.GridDots ? 1f : 0f);
 			compositeMaterial.SetFloat("_SensorMask", (short)sensorMask);   // 0 for every source but the small map
-			compositeMaterial.SetFloat("_HasSource", colorTex != null ? 1f : 0f);
+			compositeMaterial.SetFloat("_HasSource", colorTex != null || mirage ? 1f : 0f);
 			compositeMaterial.SetFloat("_NoData", gpuNoData() ? 1f : 0f);
 			compositeMaterial.SetFloat("_NoiseSeed", noiseSeed);
 			compositeMaterial.SetFloat("_SweepBand", 2f);
@@ -1297,10 +1303,24 @@ namespace SCANsat.SCAN_Map
 
 			Graphics.Blit(null, visualRenderTex, compositeMaterial);
 
-			if (reveal >= 1f)
+			// That Blit was the fully revealed one (no redline). Mirage tiles still streaming in hold the pass
+			// open, so the pump composites again as they land.
+			if (reveal >= 1f && !mirageLoading)
 			{
-				passComplete = true;   // that Blit was the fully revealed one (no redline)
+				passComplete = true;
 			}
+		}
+
+		// A Mirage body's Visual map draws from the body's own colour tiles (SCANmirageAtlas): Mirage bodies
+		// ship no equirect colour map, and their ScaledSpace is Mirage's too. Binds them for a map needing
+		// targetWidth pixels across 360 degrees; false for any other body or mode. loading: some tiles are
+		// still to land. wait: block until they have (a one-off render).
+		private bool bindMirage(int targetWidth, bool wait, out bool loading)
+		{
+			loading = false;
+			bool bound = mType == mapType.Visual && SCANmirageAtlas.Bind(compositeMaterial, body, targetWidth, wait, out loading);
+			compositeMaterial.SetFloat("_MirageColor", bound ? 1f : 0f);
+			return bound;
 		}
 
 		// The big map's graticule as a texture for the UI's grid layer, which sits above the map with
@@ -1498,7 +1518,10 @@ namespace SCANsat.SCAN_Map
 			int h = Mathf.Max(1, Mathf.RoundToInt((float)(mapheight * k)));
 			int sourceWidth = Mathf.CeilToInt((float)(mapscale * k * 360.0));
 
-			if (!SCANcontroller.controller.getVisualSource(body, sourceWidth, out Texture colorTex, out Texture normalTex, out int normalYChannel, out Texture gasRamp, out _))
+			Texture colorTex = null, normalTex = null, gasRamp = null;
+			int normalYChannel = 0;
+			if (!bindMirage(sourceWidth, true, out _)
+				&& !SCANcontroller.controller.getVisualSource(body, sourceWidth, out colorTex, out normalTex, out normalYChannel, out gasRamp, out _))
 			{
 				return null;
 			}

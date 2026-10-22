@@ -1296,6 +1296,7 @@ namespace SCANsat
 				t.Release();
 			}
 			mapTextureHandler.Clear();
+			SCANmirageAtlas.ReleaseAll();
 		}
 
 		private void watcher(float sci, ScienceSubject sub, ProtoVessel v, bool b)

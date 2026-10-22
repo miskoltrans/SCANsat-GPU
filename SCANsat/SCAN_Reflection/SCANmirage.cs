@@ -40,7 +40,25 @@ namespace SCANsat.SCAN_Reflection
 		static PropertyInfo x_HeightTileLayer_MaxLevel = null;
 		static MethodInfo x_HeightTileLayer_TryLoadNativeWalkUp = null;
 
+		// Tile reads for Visual maps (SCANmirageAtlas). Optional: without them a Mirage body's Visual map
+		// falls back to the body's other sources.
+		static Type x_VTLayer_Type = null;
+		static MethodInfo x_BodyArchive_CreateSource = null;
+		static FieldInfo x_VirtualTextureConfig_borderPx = null;
+		static PropertyInfo x_TileSource_MaxResidentLevel = null;
+		static MethodInfo x_TileSource_TryGetFormat = null;
+		static MethodInfo x_TileSource_Prepare = null;
+		static MethodInfo x_TileReadRequest_Read = null;
+		static PropertyInfo x_TileRead_Failed = null;
+		static FieldInfo x_TileRead_Payload = null;
+		static MethodInfo x_TileRead_Release = null;
+		static FieldInfo x_TilePayload_Data = null;
+		static FieldInfo x_TilePayload_Format = null;
+		static MethodInfo x_CubeMath_DirectionToFaceUV = null;
+		static MethodInfo x_CubeMath_CorrectFaceUV = null;
+
 		internal static bool MirageLoaded = false;
+		internal static bool TilesLoaded = false;
 
 		// HeightTileLayer.Sample: the height fraction [0, 1] at a raw face UV, or NaN when nothing resolves
 		delegate double SampleHeight(int face, double rawU, double rawV, int level);
@@ -104,6 +122,62 @@ namespace SCANsat.SCAN_Reflection
 			else
 			{
 				MirageLoaded = true;
+			}
+
+			if (!MirageLoaded)
+			{
+				return;
+			}
+
+			try
+			{
+				Assembly assembly = mirageAssembly.assembly;
+				BindingFlags instance = BindingFlags.Instance | BindingFlags.Public;
+				BindingFlags statics = BindingFlags.Static | BindingFlags.Public;
+
+				x_VTLayer_Type = assembly.GetType("Mirage.VirtualTexture.VTLayer");
+				x_BodyArchive_CreateSource = assembly.GetType("Mirage.VirtualTexture.BodyArchive").GetMethod("CreateSource", instance, null, new Type[] { x_VTLayer_Type, typeof(bool) }, null);
+				x_VirtualTextureConfig_borderPx = assembly.GetType("Mirage.VirtualTexture.VirtualTextureConfig").GetField("borderPx", instance);
+
+				Type source_Type = assembly.GetType("Mirage.VirtualTexture.ArchiveTileLayerSource");
+				x_TileSource_MaxResidentLevel = source_Type.GetProperty("MaxResidentLevel", instance);
+				x_TileSource_TryGetFormat = source_Type.GetMethod("TryGetFormat", instance);
+				x_TileSource_Prepare = source_Type.GetMethod("Prepare", instance, null, new Type[] { typeof(int), typeof(int), typeof(int), typeof(int) }, null);
+
+				x_TileReadRequest_Read = assembly.GetType("Mirage.VirtualTexture.TileReadRequest").GetMethod("Read", instance, null, Type.EmptyTypes, null);
+
+				Type read_Type = assembly.GetType("Mirage.VirtualTexture.TileRead");
+				x_TileRead_Failed = read_Type.GetProperty("Failed", instance);
+				x_TileRead_Payload = read_Type.GetField("Payload", instance);
+				x_TileRead_Release = read_Type.GetMethod("Release", instance, null, Type.EmptyTypes, null);
+
+				Type payload_Type = assembly.GetType("Mirage.VirtualTexture.TilePayload");
+				x_TilePayload_Data = payload_Type.GetField("Data", instance);
+				x_TilePayload_Format = payload_Type.GetField("Format", instance);
+
+				Type cube_Type = assembly.GetType("Mirage.WebIngest.MirageCubeMath");
+				Type outInt = typeof(int).MakeByRefType(), outDouble = typeof(double).MakeByRefType();
+				x_CubeMath_DirectionToFaceUV = cube_Type.GetMethod("DirectionToFaceUV", statics, null,
+					new Type[] { typeof(double), typeof(double), typeof(double), outInt, outDouble, outDouble }, null);
+				x_CubeMath_CorrectFaceUV = cube_Type.GetMethod("CorrectFaceUV", statics, null,
+					new Type[] { typeof(int), typeof(double), typeof(double), outDouble, outDouble }, null);
+			}
+			catch (Exception e)
+			{
+				Log.Exception(e);
+			}
+
+			// borderPx is optional, as tileSize is
+			if (x_VTLayer_Type == null || x_BodyArchive_CreateSource == null || x_TileSource_MaxResidentLevel == null || x_TileSource_TryGetFormat == null
+				|| x_TileSource_Prepare == null || x_TileReadRequest_Read == null || x_TileRead_Failed == null || x_TileRead_Payload == null
+				|| x_TileRead_Release == null || x_TilePayload_Data == null || x_TilePayload_Format == null
+				|| x_CubeMath_DirectionToFaceUV == null || x_CubeMath_CorrectFaceUV == null)
+			{
+				Log.Error("Failed to initialize Mirage tile reflection methods; Visual maps of Mirage bodies use their other sources");
+			}
+			else
+			{
+				TilesLoaded = true;
 			}
 		}
 
@@ -243,6 +317,176 @@ namespace SCANsat.SCAN_Reflection
 			min = Math.Min(a, b);
 			max = Math.Max(a, b);
 			return true;
+		}
+
+		/// <summary>
+		/// A reader of one of the body's tile layers (a VTLayer name: "Color", "Normal"), SCANsat's own, so a
+		/// map's sweep over the whole body never touches the reader Mirage renders from; they share Mirage's
+		/// index of the archive. Null for a body Mirage does not texture, or before Mirage has read its
+		/// configs (it does so at the main menu). Dispose the reader when done.
+		/// </summary>
+		internal static IDisposable CreateTileSource(CelestialBody body, string layer, bool linear, out int maxLevel, out int format, out int tileSize, out int borderPx)
+		{
+			maxLevel = -1;
+			format = 0;
+			tileSize = DefaultTileSize;
+			borderPx = 0;
+			if (!TilesLoaded || body == null)
+			{
+				return null;
+			}
+
+			object[] args = { body.name, null };
+			if (!(bool)x_MirageBodyRegistry_TryGet.Invoke(null, args) || args[1] == null)
+			{
+				return null;
+			}
+
+			object virtualTexture = x_MirageBodyConfig_VirtualTexture.GetValue(args[1], null);
+			if (virtualTexture == null)
+			{
+				return null;
+			}
+
+			object archive = x_VirtualTextureConfig_Archive.GetValue(virtualTexture, null);
+			IDisposable source = x_BodyArchive_CreateSource.Invoke(archive, new object[] { Enum.Parse(x_VTLayer_Type, layer), linear }) as IDisposable;
+			if (source == null)
+			{
+				return null;
+			}
+
+			maxLevel = (int)x_TileSource_MaxResidentLevel.GetValue(source, null);
+			object[] formatArgs = { 0 };
+			if (maxLevel < 0 || !(bool)x_TileSource_TryGetFormat.Invoke(source, formatArgs))
+			{
+				source.Dispose();
+				return null;
+			}
+
+			format = (int)formatArgs[0];
+			if (x_VirtualTextureConfig_tileSize != null)
+			{
+				tileSize = Math.Max(1, (int)x_VirtualTextureConfig_tileSize.GetValue(virtualTexture));
+			}
+			if (x_VirtualTextureConfig_borderPx != null)
+			{
+				borderPx = Math.Max(0, (int)x_VirtualTextureConfig_borderPx.GetValue(virtualTexture));
+			}
+
+			return source;
+		}
+
+		/// <summary>Where one tile lives, for ReadTile. Main thread only.</summary>
+		internal static object PrepareTile(IDisposable source, int face, int level, int tx, int ty)
+		{
+			return x_TileSource_Prepare.Invoke(source, new object[] { face, level, tx, ty });
+		}
+
+		/// <summary>Read and decompress a prepared tile. Safe on any thread; blocks for the read.</summary>
+		internal static object ReadTile(object request)
+		{
+			return x_TileReadRequest_Read.Invoke(request, null);
+		}
+
+		/// <summary>A read tile's texture bytes, one slot of them; null when the tile could not be read.</summary>
+		internal static byte[] TileBytes(object read, out int format)
+		{
+			format = 0;
+			if (read == null || (bool)x_TileRead_Failed.GetValue(read, null))
+			{
+				return null;
+			}
+
+			object payload = x_TileRead_Payload.GetValue(read);
+			format = (int)x_TilePayload_Format.GetValue(payload);
+			return x_TilePayload_Data.GetValue(payload) as byte[];
+		}
+
+		/// <summary>Hand a read tile's buffer back to Mirage's pool. Once per read; any thread.</summary>
+		internal static void ReleaseTile(object read)
+		{
+			if (read != null)
+			{
+				x_TileRead_Release.Invoke(read, null);
+			}
+		}
+
+		/// <summary>
+		/// Mirage's cube mapping in the form the composite shader takes it, measured through Mirage's own
+		/// functions. A tile's corrected UV is linear in the gnomonic ratios: for a direction d whose dominant
+		/// axis is N, u = (d.U / d.N + 1) / 2 and v likewise with V. Returned per dominant axis, in the
+		/// order +X, -X, +Y, -Y, +Z, -Z: U in uAxes, V in vAxes, and in uAxes' w the index of the cube
+		/// face that axis belongs to. False when Mirage maps some direction otherwise.
+		/// </summary>
+		internal static bool TryMeasureCubeBasis(out Vector4[] uAxes, out Vector4[] vAxes)
+		{
+			uAxes = new Vector4[6];
+			vAxes = new Vector4[6];
+			if (!TilesLoaded)
+			{
+				return false;
+			}
+
+			Vector3d[] axes = { Vector3d.right, Vector3d.left, Vector3d.up, Vector3d.down, Vector3d.forward, Vector3d.back };
+
+			try
+			{
+				for (int a = 0; a < 6; a++)
+				{
+					Vector3d n = axes[a];
+					// The two other axes, each a tangent of this face
+					Vector3d t1 = axes[(a / 2 * 2 + 2) % 6], t2 = axes[(a / 2 * 2 + 4) % 6];
+
+					int face = cubeUV(n, out double u0, out double v0);
+					Vector3d uAxis = Vector3d.zero, vAxis = Vector3d.zero;
+					foreach (Vector3d t in new Vector3d[] { t1, t2 })
+					{
+						// d = n + t/2, so d.N = 1, d.t = 1/2: the coordinate's offset from the face centre,
+						// 2u - 1, is half of U's component along t.
+						if (cubeUV(n + 0.5 * t, out double u, out double v) != face)
+						{
+							return false;
+						}
+
+						uAxis += t * (2 * (2 * u - 1));
+						vAxis += t * (2 * (2 * v - 1));
+					}
+
+					// The face centre has to land at (1/2, 1/2), and an off-axis direction where the model says
+					Vector3d probe = n + 0.3 * t1 - 0.2 * t2;
+					int probeFace = cubeUV(probe, out double pu, out double pv);
+					double mu = (Vector3d.Dot(probe, uAxis) + 1) / 2, mv = (Vector3d.Dot(probe, vAxis) + 1) / 2;
+					if (Math.Abs(u0 - 0.5) > 1e-9 || Math.Abs(v0 - 0.5) > 1e-9 || probeFace != face || Math.Abs(pu - mu) > 1e-9 || Math.Abs(pv - mv) > 1e-9)
+					{
+						Log.Error($"Mirage cube face {face} does not map as a gnomonic face: centre ({u0}, {v0}), probe ({pu}, {pv}) against ({mu}, {mv})");
+						return false;
+					}
+
+					uAxes[a] = new Vector4((float)uAxis.x, (float)uAxis.y, (float)uAxis.z, face);
+					vAxes[a] = new Vector4((float)vAxis.x, (float)vAxis.y, (float)vAxis.z, 0);
+				}
+			}
+			catch (Exception e)
+			{
+				Log.Exception(e);
+				return false;
+			}
+
+			return true;
+		}
+
+		// Mirage's face and corrected UV for a direction
+		static int cubeUV(Vector3d d, out double u, out double v)
+		{
+			object[] args = { d.x, d.y, d.z, 0, 0.0, 0.0 };
+			x_CubeMath_DirectionToFaceUV.Invoke(null, args);
+			int face = (int)args[3];
+
+			object[] corrected = { face, args[4], args[5], 0.0, 0.0 };
+			x_CubeMath_CorrectFaceUV.Invoke(null, corrected);
+			u = (double)corrected[3];
+			v = (double)corrected[4];
+			return face;
 		}
 
 		static MirageBody find(CelestialBody body)
