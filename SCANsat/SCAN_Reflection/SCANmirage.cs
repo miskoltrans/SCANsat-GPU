@@ -207,7 +207,21 @@ namespace SCANsat.SCAN_Reflection
 			Vector3d rad = new Vector3d(Math.Cos(rlat) * Math.Cos(rlon), Math.Sin(rlat), Math.Cos(rlat) * Math.Sin(rlon));
 			PQSMod_GnomonicTest.GetGnomonicMapCoords(rad, out PQS.QuadPlane plane, out double u, out double v);
 
-			double h = mb.sample((int)plane, u, v, level < 0 || level > mb.maxLevel ? mb.maxLevel : level);
+			double h;
+			try
+			{
+				h = mb.sample((int)plane, u, v, level < 0 || level > mb.maxLevel ? mb.maxLevel : level);
+			}
+			catch (Exception e)
+			{
+				// An archive that stops reading (a file gone, a Mirage change) falls back to PQS, not into every map
+				Log.Exception(e);
+				Log.Error($"Mirage heights for {mb.name} could not be read; using PQS altimetry");
+				mb.broken = true;
+				release(mb);
+				return false;
+			}
+
 			if (double.IsNaN(h))
 			{
 				return false;
@@ -509,12 +523,21 @@ namespace SCANsat.SCAN_Reflection
 					PQSMod mod = mods[i];
 					if (mod != null && mod.modEnabled && x_PQSMod_MirageTerrain_Type.IsInstanceOfType(mod))
 					{
-						mb = new MirageBody
+						try
 						{
-							name = body.name,
-							deformity = (double)x_PQSMod_MirageTerrain_deformity.GetValue(mod),
-							offset = (double)x_PQSMod_MirageTerrain_offset.GetValue(mod),
-						};
+							mb = new MirageBody
+							{
+								name = body.name,
+								deformity = Convert.ToDouble(x_PQSMod_MirageTerrain_deformity.GetValue(mod)),
+								offset = Convert.ToDouble(x_PQSMod_MirageTerrain_offset.GetValue(mod)),
+							};
+						}
+						catch (Exception e)
+						{
+							Log.Exception(e);
+							Log.Error($"Mirage's height scale for {body.name} could not be read; using PQS altimetry");
+						}
+
 						break;
 					}
 				}
@@ -601,6 +624,26 @@ namespace SCANsat.SCAN_Reflection
 			}
 
 			return true;
+		}
+
+		/// <summary>
+		/// Free every height layer (its tile cache and open files); the next sample builds it again. A body
+		/// whose archive failed is tried again in the next scene.
+		/// </summary>
+		internal static void ReleaseAll()
+		{
+			for (int i = layerOrder.Count - 1; i >= 0; i--)
+			{
+				release(layerOrder[i]);
+			}
+
+			foreach (MirageBody mb in bodies.Values)
+			{
+				if (mb != null)
+				{
+					mb.broken = false;
+				}
+			}
 		}
 
 		static void release(MirageBody mb)

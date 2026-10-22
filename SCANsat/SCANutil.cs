@@ -998,7 +998,9 @@ namespace SCANsat
 
 		internal static double getElevation(CelestialBody body, int lon, int lat)
 		{
-			if (SCANmirage.TryGetElevation(body, lon, lat, -1, out double mirageHeight))
+			// The whole-degree grid of SCANdata's height map: a Mirage body at the level for one pixel per degree,
+			// a few tiles in all, not the deepest level's thousands
+			if (SCANmirage.TryGetElevation(body, lon, lat, SCANmirage.LevelForScale(body, 1), out double mirageHeight))
 			{
 				return Math.Round(mirageHeight, 1);
 			}
