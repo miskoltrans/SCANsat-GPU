@@ -45,6 +45,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 		_HasSource ("Has Visual Source", Float) = 1
 		_MirageColor ("Visual From Mirage Tiles", Float) = 0
 		_MirageTiles ("Mirage Colour Tiles", 2D) = "gray" {}
+		_MirageNormals ("Mirage Normal Tiles", 2D) = "gray" {}
 		_MirageIndirection ("Mirage Tile Slots", 2D) = "black" {}
 		_HasElevation ("Has Elevation", Float) = 1
 		_OutputAlpha ("Output Alpha", Float) = 1
@@ -95,8 +96,9 @@ Shader "Hidden/SCANsat/VisualComposite"
 
 			// Visual from a Mirage body's colour tiles instead of _ScaledColor (SCANmirageAtlas): one cube
 			// level of the whole body in an atlas of slots (a tile and its border), level 0's six in slots 0-5.
-			float _MirageColor;           // 1: Visual samples the Mirage atlas (mirageColor)
-			sampler2D _MirageTiles;       // the atlas, bilinear: a slot's border keeps the filter seamless across tiles
+			float _MirageColor;           // 1: Visual samples the Mirage atlases (mirageUV)
+			sampler2D _MirageTiles;       // colour, bilinear: a slot's border keeps the filter seamless across tiles
+			sampler2D _MirageNormals;     // normals in the same slots, BC5: r = 0.5 - 0.5 east, g = 0.5 - 0.5 north. Bound when _HasNormal
 			sampler2D _MirageIndirection; // per tile of the level, point-sampled at (tx, face * n + ty): rg = slot column and row / 255, a = 1 once landed
 			float4 _MirageU[6];           // per dominant axis (+X, -X, +Y, -Y, +Z, -Z): u = (d.U / |d.N| + 1) / 2; w = Mirage's face index
 			float4 _MirageV[6];           // the same for v
@@ -298,13 +300,13 @@ Shader "Hidden/SCANsat/VisualComposite"
 				return c;
 			}
 
-			// A Mirage body's colour at a lon/lat in degrees. The direction is KSP's (the one SCANUtil hands PQS);
+			// Where a Mirage body's tiles hold a lon/lat in degrees: the atlas UV. The direction is KSP's (the one SCANUtil hands PQS);
 			// its dominant axis picks the cube face, and the gnomonic ratios against that axis give the face UV
 			// the tiles are stored in - Mirage's own mapping, measured by SCANmirage.TryMeasureCubeBasis. The
 			// indirection texture names the tile's slot, or the pixel reads level 0's whole-face tile while
 			// its own is still loading. LOD 0: the level already matches the map's scale (no mips to pick).
 			// Float flags instead of bools, as in unproject.
-			float4 mirageColor(float lon, float lat)
+			float2 mirageUV(float lon, float lat)
 			{
 				float rlat = lat * DEG2RAD;
 				float rlon = lon * DEG2RAD;
@@ -335,7 +337,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 				}
 
 				float2 px = slot * _MirageTile.w + _MirageTile.z + f * _MirageTile.y;
-				return tex2Dlod(_MirageTiles, float4(px * _MirageAtlas.y, 0.0, 0.0));
+				return px * _MirageAtlas.y;
 			}
 
 			// Which channel of the normal map holds Y depends on its format (DXT5nm and BC5 keep it in
@@ -617,15 +619,28 @@ Shader "Hidden/SCANsat/VisualComposite"
 					bool visLo = covHas(cov, 2.0);
 					if (visHi)
 					{
+						float2 mUV = float2(0.0, 0.0);
 						if (_MirageColor > 0.5)
-							col = mirageColor(lon, lat);
+						{
+							mUV = mirageUV(lon, lat);
+							col = tex2Dlod(_MirageTiles, float4(mUV, 0.0, 0.0));
+						}
 						else
 							col = tex2Dgrad(_ScaledColor, visUV, visDX, visDY);
 						col.rgb = gasColor(col.rgb);
 						if (_ColorMode > 0.5)
 						{
 							if (_HasNormal > 0.5)
-								col.rgb = normalSoftLight(col.rgb, normalY(tex2Dgrad(_ScaledNormal, visUV, visDX, visDY)));
+							{
+								// Mirage keeps the north component in green, as BC5 sources do here, and with the same
+								// sign as the equirect normal maps (measured: SCANautoTest's shading check)
+								float ny;
+								if (_MirageColor > 0.5)
+									ny = tex2Dlod(_MirageNormals, float4(mUV, 0.0, 0.0)).g;
+								else
+									ny = normalY(tex2Dgrad(_ScaledNormal, visUV, visDX, visDY));
+								col.rgb = normalSoftLight(col.rgb, ny);
+							}
 						}
 						else
 						{
@@ -639,7 +654,7 @@ Shader "Hidden/SCANsat/VisualComposite"
 						// The floor() step makes the derivative spike at every block edge, which would pick a
 						// coarse mip there. Level 0 is what the CPU did (GetPixelBilinear on the base level).
 						if (_MirageColor > 0.5)
-							col = mirageColor((1.0 - q.x) * 360.0 - 270.0, q.y * 180.0 - 90.0);   // q back to lon/lat (fLon/fLat above)
+							col = tex2Dlod(_MirageTiles, float4(mirageUV((1.0 - q.x) * 360.0 - 270.0, q.y * 180.0 - 90.0), 0.0, 0.0));   // q back to lon/lat (fLon/fLat above)
 						else
 							col = tex2Dlod(_ScaledColor, float4(q, 0.0, 0.0));
 						col.rgb = gasColor(col.rgb);

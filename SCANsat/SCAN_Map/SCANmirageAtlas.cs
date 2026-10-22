@@ -10,61 +10,78 @@ using Log = KSPCommunityLib.Logging.Log;
 namespace SCANsat.SCAN_Map
 {
 	/// <summary>
-	/// A Mirage body's colour tiles on the GPU, for its Visual map. Mirage bodies ship no equirect colour
-	/// map; their surface is a cube of tiles, deeper levels finer, in Mirage's archive. One level of the
-	/// whole body is copied into a texture atlas as it is stored - block-compressed (BC7), never decoded on
-	/// the CPU - with the six level-0 tiles beside it, which stand in while the level streams in. The
-	/// composite shader turns each pixel's lon/lat into a cube face and UV, finds the tile's slot in the
-	/// indirection texture (one texel per tile of the level) and samples it (SCANVisualComposite's
-	/// mirageColor). Mirage reads and decompresses the tiles on a worker thread; the main thread copies
-	/// them in, a batch at a time, whenever a map binds the atlas.
+	/// A Mirage body's colour and normal tiles on the GPU, for its Visual map. Mirage bodies ship no
+	/// equirect maps; their surface is a cube of tiles, deeper levels finer, in Mirage's archive. One level
+	/// of the whole body is copied into texture atlases as it is stored - block-compressed (BC7 colour, BC5
+	/// normals), never decoded on the CPU - with the six level-0 tiles beside it, which stand in while the
+	/// level streams in. Both layers share one slot layout. The composite shader turns each pixel's lon/lat
+	/// into a cube face and UV, finds the tile's slot in the indirection texture (one texel per tile of the
+	/// level) and samples it (SCANVisualComposite's mirageUV). Mirage reads and decompresses the tiles on a
+	/// worker thread; the main thread copies them in, a batch at a time, whenever a map binds the atlas.
 	/// </summary>
 	internal sealed class SCANmirageAtlas : IDisposable
 	{
-		// The equirect sources' budget (SCANtextures.TextureBudget): a whole body to level 3 at 264 px BC7 slots
-		const long MaxBytes = 32L * 1048576;
+		// Per layer, the equirect sources' budget (SCANtextures.TextureBudget): a whole body to level 3 at
+		// 264 px slots, 27 MB each for colour and normals
+		const long MaxBytesPerLayer = 32L * 1048576;
 		// Atlases kept, most recently bound last: a big map and a zoom map can want different levels of one body
 		const int MaxAtlases = 3;
-		// Tiles copied in per bind, 70 KB each
+		// Tiles copied in per bind, 70 KB per layer each
 		const int UploadsPerBind = 64;
 		// A one-off render (the Visual export) waits at most this long for its tiles
 		const int WaitMilliseconds = 10000;
 
 		static readonly List<SCANmirageAtlas> atlases = new List<SCANmirageAtlas>();
 		static readonly HashSet<string> failedBodies = new HashSet<string>();
-		// What a body's colour reader reported when first made; null for a body Mirage does not texture.
-		// Maps only draw in flight and the tracking station, after Mirage has read its configs.
-		static readonly Dictionary<CelestialBody, Layer> layers = new Dictionary<CelestialBody, Layer>();
+		// What a body's readers report, taken once; null for a body Mirage does not texture. Maps only draw
+		// in flight and the tracking station, after Mirage has read its configs at the main menu.
+		static readonly Dictionary<CelestialBody, Layers> bodyLayers = new Dictionary<CelestialBody, Layers>();
 		static Vector4[] basisU, basisV;
 		static bool basisMeasured, basisFailed;
 
 		class Layer
 		{
+			internal string name;
+			internal bool linear;
 			internal int maxLevel, format, tileSize, border;
+		}
+
+		// normal is null when the body has no normals the shader can read (BC5), and Visual is unshaded
+		class Layers
+		{
+			internal Layer color, normal;
+		}
+
+		// One layer's reader, its prepared requests and landed reads (by job), and its GPU copy
+		sealed class Plane
+		{
+			internal Layer layer;
+			internal IDisposable source;
+			internal object[] requests, reads;
+			internal Texture2D texture, staging;
+			internal int missing;
 		}
 
 		struct Job
 		{
 			internal int face, level, tx, ty, slot;
-			internal object request;
 		}
 
 		readonly CelestialBody body;
 		readonly int level;
 		readonly int tileSize, border, slotSize, columns, atlasSize;
-		readonly TextureFormat format;
 		readonly Job[] jobs;
+		readonly Plane[] planes;   // colour, then normals if the body has them
 		readonly Stopwatch clock = Stopwatch.StartNew();
 
-		IDisposable source;
-		Texture2D atlas, staging, indirection;
+		Texture2D indirection;
 		Color32[] indirectionPixels;
 		bool indirectionDirty;
+		byte[] flatNormal;   // a level BC5 slot, for a normal tile that will not read
 
-		// Worker -> main thread. reads[i] is jobs[i]'s TileRead once landed; landedCount only grows.
+		// Worker -> main thread. A plane's reads[i] is job i's TileRead once landed; landedCount only grows.
 		readonly object gate = new object();
-		readonly object[] reads;
-		int landedCount, uploadedCount, missing;
+		int landedCount, uploadedCount;
 		bool workerRunning;
 		volatile bool cancelled;
 		Exception workerError;
@@ -72,14 +89,15 @@ namespace SCANsat.SCAN_Map
 		internal bool Complete { get { return uploadedCount == jobs.Length; } }
 
 		/// <summary>
-		/// Point a composite material at the body's colour tiles, for a map needing targetWidth pixels
-		/// across 360 degrees, and copy in whatever has landed since the last bind. False when the body
-		/// is not a Mirage body or its tiles cannot be read: the caller uses the body's other sources.
-		/// loading: the level is still streaming in, so the caller should composite again. wait: block
-		/// until it has all landed (a one-off render).
+		/// Point a composite material at the body's tiles, for a map needing targetWidth pixels across 360
+		/// degrees, and copy in whatever has landed since the last bind. False when the body is not a Mirage
+		/// body or its tiles cannot be read: the caller uses the body's other sources. shaded: normals are
+		/// bound too. loading: the level is still streaming in, so the caller should composite again. wait:
+		/// block until it has all landed (a one-off render).
 		/// </summary>
-		internal static bool Bind(Material m, CelestialBody body, int targetWidth, bool wait, out bool loading)
+		internal static bool Bind(Material m, CelestialBody body, int targetWidth, bool wait, out bool shaded, out bool loading)
 		{
+			shaded = false;
 			loading = false;
 			if (!SCANmirage.TilesLoaded || body == null || failedBodies.Contains(body.name) || !measureBasis())
 			{
@@ -94,8 +112,10 @@ namespace SCANsat.SCAN_Map
 
 			a.pump(wait);
 			loading = !a.Complete;
+			shaded = a.planes.Length > 1;
 
-			m.SetTexture("_MirageTiles", a.atlas);
+			m.SetTexture("_MirageTiles", a.planes[0].texture);
+			m.SetTexture("_MirageNormals", shaded ? a.planes[1].texture : null);
 			m.SetTexture("_MirageIndirection", a.indirection);
 			m.SetVectorArray("_MirageU", basisU);
 			m.SetVectorArray("_MirageV", basisV);
@@ -133,55 +153,32 @@ namespace SCANsat.SCAN_Map
 		// The atlas for this body at the level a map this wide needs, made on first use
 		static SCANmirageAtlas find(CelestialBody body, int targetWidth)
 		{
-			IDisposable source = null;
 			try
 			{
-				// The level is the reader's to say (its depth, tile size and format), so ask it once per body
-				if (!layers.TryGetValue(body, out Layer layer))
+				if (!bodyLayers.TryGetValue(body, out Layers layers))
 				{
-					source = SCANmirage.CreateTileSource(body, "Color", false, out int maxLevel, out int format, out int tileSize, out int border);
-					layer = source == null ? null : new Layer { maxLevel = maxLevel, format = format, tileSize = tileSize, border = border };
-					layers[body] = layer;
+					layers = probe(body);
+					bodyLayers[body] = layers;
 				}
 
-				if (layer == null)
+				if (layers == null)
 				{
 					return null;
 				}
 
-				int level = levelFor(targetWidth, layer.maxLevel, layer.tileSize, layer.border, layer.format);
+				int level = levelFor(targetWidth, layers);
 				for (int i = 0; i < atlases.Count; i++)
 				{
 					SCANmirageAtlas a = atlases[i];
 					if (a.body == body && a.level == level)
 					{
-						source?.Dispose();
 						atlases.RemoveAt(i);
 						atlases.Add(a);
 						return a;
 					}
 				}
 
-				TextureFormat textureFormat = (TextureFormat)layer.format;
-				if (!SystemInfo.SupportsTextureFormat(textureFormat))
-				{
-					source?.Dispose();
-					failedBodies.Add(body.name);
-					Log.Error($"[{body.name}] Mirage colour tiles are {textureFormat}, which this graphics device cannot sample; Visual uses the body's other sources");
-					return null;
-				}
-
-				if (source == null)
-				{
-					source = SCANmirage.CreateTileSource(body, "Color", false, out _, out _, out _, out _);
-					if (source == null)
-					{
-						return null;
-					}
-				}
-
-				SCANmirageAtlas made = new SCANmirageAtlas(body, source, level, textureFormat, layer.tileSize, layer.border);
-				source = null;   // the atlas owns it now
+				SCANmirageAtlas made = new SCANmirageAtlas(body, layers, level);
 				atlases.Add(made);
 				while (atlases.Count > MaxAtlases)
 				{
@@ -193,24 +190,64 @@ namespace SCANsat.SCAN_Map
 			}
 			catch (Exception e)
 			{
-				source?.Dispose();
 				failedBodies.Add(body.name);
 				Log.Exception(e);
-				Log.Error($"[{body.name}] Mirage colour tiles could not be read; Visual uses the body's other sources");
+				Log.Error($"[{body.name}] Mirage tiles could not be read; Visual uses the body's other sources");
 				return null;
+			}
+		}
+
+		// What the body's readers say about its layers: depth, format, tile size. Null when it has no
+		// colour layer this device can sample.
+		static Layers probe(CelestialBody body)
+		{
+			Layer color = probe(body, "Color", false);
+			if (color == null)
+			{
+				return null;
+			}
+
+			if (!SystemInfo.SupportsTextureFormat((TextureFormat)color.format))
+			{
+				Log.Error($"[{body.name}] Mirage colour tiles are {(TextureFormat)color.format}, which this graphics device cannot sample; Visual uses the body's other sources");
+				return null;
+			}
+
+			// The shader reads normals the way Mirage stores them in BC5: east in red, north in green
+			Layer normal = probe(body, "Normal", true);
+			if (normal != null && ((TextureFormat)normal.format != TextureFormat.BC5 || !SystemInfo.SupportsTextureFormat(TextureFormat.BC5)
+				|| normal.tileSize != color.tileSize || normal.border != color.border))
+			{
+				Log.Warning($"[{body.name}] Mirage normal tiles are {(TextureFormat)normal.format}, {normal.tileSize} px; Visual is drawn without shading");
+				normal = null;
+			}
+
+			return new Layers { color = color, normal = normal };
+		}
+
+		static Layer probe(CelestialBody body, string name, bool linear)
+		{
+			using (IDisposable source = SCANmirage.CreateTileSource(body, name, linear, out int maxLevel, out int format, out int tileSize, out int border))
+			{
+				return source == null ? null : new Layer { name = name, linear = linear, maxLevel = maxLevel, format = format, tileSize = tileSize, border = border };
 			}
 		}
 
 		// The coarsest level whose texels are no larger than a map pixel - a face spans 90 degrees in 2^level
 		// tiles - within the archive's depth and the memory budget.
-		static int levelFor(int targetWidth, int maxLevel, int tileSize, int border, int format)
+		static int levelFor(int targetWidth, Layers layers)
 		{
-			double tiles = targetWidth / 4.0 / tileSize;
+			Layer color = layers.color;
+			double tiles = targetWidth / 4.0 / color.tileSize;
 			int level = tiles <= 1 ? 0 : (int)Math.Ceiling(Math.Log(tiles, 2));
-			level = Math.Min(level, maxLevel);
+			level = Math.Min(level, color.maxLevel);
+			if (layers.normal != null)
+			{
+				level = Math.Min(level, layers.normal.maxLevel);
+			}
 
-			long slotBytes = slotBytesOf((TextureFormat)format, tileSize + 2 * border);
-			while (level > 0 && slotsFor(level) * slotBytes > MaxBytes)
+			long slotBytes = slotBytesOf((TextureFormat)color.format, color.tileSize + 2 * color.border);
+			while (level > 0 && slotsFor(level) * slotBytes > MaxBytesPerLayer)
 			{
 				level--;
 			}
@@ -243,14 +280,12 @@ namespace SCANsat.SCAN_Map
 			}
 		}
 
-		SCANmirageAtlas(CelestialBody body, IDisposable source, int level, TextureFormat format, int tileSize, int border)
+		SCANmirageAtlas(CelestialBody body, Layers layers, int level)
 		{
 			this.body = body;
-			this.source = source;
 			this.level = level;
-			this.format = format;
-			this.tileSize = tileSize;
-			this.border = border;
+			tileSize = layers.color.tileSize;
+			border = layers.color.border;
 			slotSize = tileSize + 2 * border;
 
 			int slots = slotsFor(level);
@@ -279,27 +314,58 @@ namespace SCANsat.SCAN_Map
 				}
 			}
 
-			// Mirage resolves tiles on the main thread only
-			for (int i = 0; i < list.Count; i++)
+			jobs = list.ToArray();
+
+			List<Plane> made = new List<Plane>(2);
+			try
 			{
-				Job j = list[i];
-				j.request = SCANmirage.PrepareTile(source, j.face, j.level, j.tx, j.ty);
-				list[i] = j;
+				foreach (Layer layer in new Layer[] { layers.color, layers.normal })
+				{
+					if (layer == null)
+					{
+						continue;
+					}
+
+					Plane p = new Plane { layer = layer };
+					made.Add(p);
+					p.source = SCANmirage.CreateTileSource(body, layer.name, layer.linear, out _, out _, out _, out _);
+					if (p.source == null)
+					{
+						throw new InvalidOperationException("Mirage " + layer.name + " reader for " + body.name + " went away");
+					}
+
+					// Mirage resolves tiles on the main thread only
+					p.requests = new object[jobs.Length];
+					p.reads = new object[jobs.Length];
+					for (int i = 0; i < jobs.Length; i++)
+					{
+						Job j = jobs[i];
+						p.requests[i] = SCANmirage.PrepareTile(p.source, j.face, j.level, j.tx, j.ty);
+					}
+
+					TextureFormat format = (TextureFormat)layer.format;
+					// Created unreadable: the tiles are copied in on the GPU, and a CPU copy would only double the memory
+					p.texture = new Texture2D(atlasSize, atlasSize, format, false, layer.linear)
+					{
+						name = "SCANsat Mirage " + layer.name + " " + body.name + " L" + level,
+						filterMode = FilterMode.Bilinear,
+						wrapMode = TextureWrapMode.Clamp,
+					};
+					p.texture.Apply(false, true);
+					p.staging = new Texture2D(slotSize, slotSize, format, false, layer.linear);
+				}
+			}
+			catch
+			{
+				foreach (Plane p in made)
+				{
+					disposePlane(p);
+				}
+
+				throw;
 			}
 
-			jobs = list.ToArray();
-			reads = new object[jobs.Length];
-
-			// Created unreadable: the tiles are copied in on the GPU, and a CPU copy would only double the memory
-			atlas = new Texture2D(atlasSize, atlasSize, format, false, false)
-			{
-				name = "SCANsat Mirage colour " + body.name + " L" + level,
-				filterMode = FilterMode.Bilinear,
-				wrapMode = TextureWrapMode.Clamp,
-			};
-			atlas.Apply(false, true);
-
-			staging = new Texture2D(slotSize, slotSize, format, false, false);
+			planes = made.ToArray();
 
 			// One texel per tile of the level, faces stacked: x = tx, y = face * n + ty. rg = the tile's slot
 			// column and row, a = 255 once it has landed.
@@ -313,7 +379,13 @@ namespace SCANsat.SCAN_Map
 			indirection.SetPixels32(indirectionPixels);
 			indirection.Apply(false);
 
-			Log.Message($"[{body.name}] Mirage colour: level {level}, {jobs.Length} tiles of {slotSize} px {format} ({atlasSize} px atlas, {slotsFor(level) * slotBytesOf(format, slotSize) / 1048576.0:F1} MB)");
+			long bytes = 0;
+			foreach (Plane p in planes)
+			{
+				bytes += slots * slotBytesOf((TextureFormat)p.layer.format, slotSize);
+			}
+
+			Log.Message($"[{body.name}] Mirage Visual: level {level}, {jobs.Length} tiles of {slotSize} px, {(planes.Length > 1 ? "colour and normals" : "colour only")} ({atlasSize} px atlases, {bytes / 1048576.0:F1} MB)");
 
 			workerRunning = true;
 			ThreadPool.QueueUserWorkItem(_ => readAll());
@@ -324,47 +396,57 @@ namespace SCANsat.SCAN_Map
 		{
 			for (int i = 0; i < jobs.Length; i++)
 			{
-				object read = null;
-				try
+				foreach (Plane p in planes)
 				{
-					if (!cancelled)
+					object read = null;
+					try
 					{
-						read = SCANmirage.ReadTile(jobs[i].request);
+						if (!cancelled)
+						{
+							read = SCANmirage.ReadTile(p.requests[i]);
+						}
 					}
-				}
-				catch (Exception e)
-				{
+					catch (Exception e)
+					{
+						lock (gate)
+						{
+							if (workerError == null)
+							{
+								workerError = e;
+							}
+						}
+					}
+
 					lock (gate)
 					{
-						if (workerError == null)
+						if (cancelled)
 						{
-							workerError = e;
+							SCANmirage.ReleaseTile(read);
+							read = null;
 						}
+
+						p.reads[i] = read;
 					}
 				}
 
 				lock (gate)
 				{
-					if (cancelled)
-					{
-						SCANmirage.ReleaseTile(read);
-						read = null;
-					}
-
-					reads[i] = read;
 					landedCount = i + 1;
 				}
 			}
 
-			// Every request is read: the reader (its open files) is done with
+			// Every request is read: the readers (their open files) are done with
 			lock (gate)
 			{
 				workerRunning = false;
-				disposeSource();
+				foreach (Plane p in planes)
+				{
+					disposeSource(p);
+				}
 			}
 		}
 
-		// Main thread: copy landed tiles into the atlas
+		// Main thread: copy landed tiles into the atlases
 		void pump(bool wait)
 		{
 			if (Complete)
@@ -411,54 +493,93 @@ namespace SCANsat.SCAN_Map
 
 			if (Complete)
 			{
-				if (missing > 0)
+				foreach (Plane p in planes)
 				{
-					Log.Error($"[{body.name}] Mirage colour: {missing} of {jobs.Length} tiles at level {level} could not be read; level 0 stands in for them");
+					if (p.missing > 0)
+					{
+						Log.Error($"[{body.name}] Mirage {p.layer.name}: {p.missing} of {jobs.Length} tiles at level {level} could not be read; "
+							+ (p == planes[0] ? "level 0 stands in for them" : "they are drawn unshaded"));
+					}
 				}
 
-				Log.Message($"[{body.name}] Mirage colour: level {level} on the GPU in {clock.Elapsed.TotalSeconds:F2} s");
+				Log.Message($"[{body.name}] Mirage Visual: level {level} on the GPU in {clock.Elapsed.TotalSeconds:F2} s");
 			}
 		}
 
+		// Job i's tile of every layer into its slot. The colour tile decides whether the slot counts as
+		// landed; a normal tile that will not read is left level, so it cannot shade its colour wrongly.
 		void upload(int i)
 		{
 			Job j = jobs[i];
-			object read = reads[i];
-			reads[i] = null;
+			int sx = j.slot % columns, sy = j.slot / columns;
+			bool landed = false;
 
-			try
+			foreach (Plane p in planes)
 			{
-				byte[] data = SCANmirage.TileBytes(read, out int tileFormat);
-				NativeArray<byte> raw = staging.GetRawTextureData<byte>();
-				if (data == null || tileFormat != (int)format || data.Length < raw.Length)
+				object read = p.reads[i];
+				p.reads[i] = null;
+
+				try
 				{
-					missing++;
-					return;
+					byte[] data = SCANmirage.TileBytes(read, out int tileFormat);
+					NativeArray<byte> raw = p.staging.GetRawTextureData<byte>();
+					if (data == null || tileFormat != p.layer.format || data.Length < raw.Length)
+					{
+						p.missing++;
+						if (p == planes[0])
+						{
+							continue;
+						}
+
+						data = flatBC5(raw.Length);
+					}
+
+					NativeArray<byte>.Copy(data, raw, raw.Length);
+					p.staging.Apply(false);
+					Graphics.CopyTexture(p.staging, 0, 0, 0, 0, slotSize, slotSize, p.texture, 0, 0, sx * slotSize, sy * slotSize);
+					landed |= p == planes[0];
 				}
-
-				NativeArray<byte>.Copy(data, raw, raw.Length);
-				staging.Apply(false);
-
-				int sx = j.slot % columns, sy = j.slot / columns;
-				Graphics.CopyTexture(staging, 0, 0, 0, 0, slotSize, slotSize, atlas, 0, 0, sx * slotSize, sy * slotSize);
-
-				if (j.level == level)
+				finally
 				{
-					int n = 1 << level;
-					indirectionPixels[(j.face * n + j.ty) * n + j.tx] = new Color32((byte)sx, (byte)sy, 0, 255);
-					indirectionDirty = true;
+					SCANmirage.ReleaseTile(read);
 				}
 			}
-			finally
+
+			if (landed && j.level == level)
 			{
-				SCANmirage.ReleaseTile(read);
+				int n = 1 << level;
+				indirectionPixels[(j.face * n + j.ty) * n + j.tx] = new Color32((byte)sx, (byte)sy, 0, 255);
+				indirectionDirty = true;
 			}
 		}
 
-		void disposeSource()
+		// A BC5 slot of level normals: every block's two channels at Mirage's flat value, 128
+		byte[] flatBC5(int length)
 		{
-			source?.Dispose();
-			source = null;
+			if (flatNormal == null || flatNormal.Length != length)
+			{
+				flatNormal = new byte[length];
+				for (int b = 0; b < length; b += 8)
+				{
+					flatNormal[b] = 128;
+					flatNormal[b + 1] = 128;
+				}
+			}
+
+			return flatNormal;
+		}
+
+		static void disposeSource(Plane p)
+		{
+			p.source?.Dispose();
+			p.source = null;
+		}
+
+		static void disposePlane(Plane p)
+		{
+			disposeSource(p);
+			if (p.texture != null) { UnityEngine.Object.Destroy(p.texture); p.texture = null; }
+			if (p.staging != null) { UnityEngine.Object.Destroy(p.staging); p.staging = null; }
 		}
 
 		public void Dispose()
@@ -466,21 +587,26 @@ namespace SCANsat.SCAN_Map
 			lock (gate)
 			{
 				cancelled = true;
-				for (int i = uploadedCount; i < landedCount; i++)
+				foreach (Plane p in planes)
 				{
-					SCANmirage.ReleaseTile(reads[i]);
-					reads[i] = null;
-				}
+					// To the end, not landedCount: the job being read can hold one layer's tile already
+					for (int i = uploadedCount; i < jobs.Length; i++)
+					{
+						SCANmirage.ReleaseTile(p.reads[i]);
+						p.reads[i] = null;
+					}
 
-				// A running worker disposes the reader on its way out
-				if (!workerRunning)
-				{
-					disposeSource();
+					// A running worker disposes the readers on its way out
+					if (!workerRunning)
+					{
+						disposeSource(p);
+					}
+
+					if (p.texture != null) { UnityEngine.Object.Destroy(p.texture); p.texture = null; }
+					if (p.staging != null) { UnityEngine.Object.Destroy(p.staging); p.staging = null; }
 				}
 			}
 
-			if (atlas != null) { UnityEngine.Object.Destroy(atlas); atlas = null; }
-			if (staging != null) { UnityEngine.Object.Destroy(staging); staging = null; }
 			if (indirection != null) { UnityEngine.Object.Destroy(indirection); indirection = null; }
 		}
 	}

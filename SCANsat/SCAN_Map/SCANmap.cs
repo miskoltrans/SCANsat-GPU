@@ -1213,7 +1213,7 @@ namespace SCANsat.SCAN_Map
 
 			Texture colorTex = null, normalTex = null, gasRamp = null;
 			int normalYChannel = 0;
-			bool mirage = bindMirage(visualTargetWidth(), false, out bool mirageLoading);
+			bool mirage = bindMirage(visualTargetWidth(), false, out bool mirageShaded, out bool mirageLoading);
 			if (!mirage)
 			{
 				SCANcontroller.controller.getVisualSource(body, visualTargetWidth(), out colorTex, out normalTex, out normalYChannel, out gasRamp, out _);
@@ -1235,7 +1235,7 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetFloat("_CenteredLon", (float)centeredLong);
 			compositeMaterial.SetFloat("_CenteredLat", (float)centeredLat);
 			compositeMaterial.SetFloat("_ColorMode", colorMap ? 1f : 0f);
-			compositeMaterial.SetFloat("_HasNormal", normalTex != null ? 1f : 0f);
+			compositeMaterial.SetFloat("_HasNormal", normalTex != null || mirageShaded ? 1f : 0f);
 			compositeMaterial.SetFloat("_NormalYChannel", normalYChannel);
 			// A gas giant hands over a cloud pattern rather than a colour map; the shader colours it
 			// through the body's own gradient (SCANcontroller.GetVisualMapTexturesForBody).
@@ -1314,11 +1314,11 @@ namespace SCANsat.SCAN_Map
 		// A Mirage body's Visual map draws from the body's own colour tiles (SCANmirageAtlas): Mirage bodies
 		// ship no equirect colour map, and their ScaledSpace is Mirage's too. Binds them for a map needing
 		// targetWidth pixels across 360 degrees; false for any other body or mode. loading: some tiles are
-		// still to land. wait: block until they have (a one-off render).
-		private bool bindMirage(int targetWidth, bool wait, out bool loading)
+		// still to land. shaded: its normals are bound too. wait: block until they have (a one-off render).
+		private bool bindMirage(int targetWidth, bool wait, out bool shaded, out bool loading)
 		{
-			loading = false;
-			bool bound = mType == mapType.Visual && SCANmirageAtlas.Bind(compositeMaterial, body, targetWidth, wait, out loading);
+			shaded = loading = false;
+			bool bound = mType == mapType.Visual && SCANmirageAtlas.Bind(compositeMaterial, body, targetWidth, wait, out shaded, out loading);
 			compositeMaterial.SetFloat("_MirageColor", bound ? 1f : 0f);
 			return bound;
 		}
@@ -1520,7 +1520,8 @@ namespace SCANsat.SCAN_Map
 
 			Texture colorTex = null, normalTex = null, gasRamp = null;
 			int normalYChannel = 0;
-			if (!bindMirage(sourceWidth, true, out _)
+			bool mirageShaded = false;
+			if (!bindMirage(sourceWidth, true, out mirageShaded, out _)
 				&& !SCANcontroller.controller.getVisualSource(body, sourceWidth, out colorTex, out normalTex, out normalYChannel, out gasRamp, out _))
 			{
 				return null;
@@ -1536,7 +1537,7 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetTexture("_ScaledColor", colorTex);
 			compositeMaterial.SetTexture("_ScaledNormal", normalTex);
 			compositeMaterial.SetTexture("_GasRamp", gasRamp);
-			compositeMaterial.SetFloat("_HasNormal", normalTex != null ? 1f : 0f);
+			compositeMaterial.SetFloat("_HasNormal", normalTex != null || mirageShaded ? 1f : 0f);
 			compositeMaterial.SetFloat("_NormalYChannel", normalYChannel);
 			compositeMaterial.SetFloat("_GasGiant", gasRamp != null ? 1f : 0f);
 			setFramingUniforms(w, h, mapscale * k);
