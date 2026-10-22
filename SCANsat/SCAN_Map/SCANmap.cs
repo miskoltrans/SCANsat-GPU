@@ -1318,7 +1318,8 @@ namespace SCANsat.SCAN_Map
 		private bool bindMirage(int targetWidth, bool wait, out bool shaded, out bool loading)
 		{
 			shaded = loading = false;
-			bool bound = mType == mapType.Visual && SCANmirageAtlas.Bind(compositeMaterial, body, targetWidth, mirageWindowFor(), wait, out shaded, out loading);
+			bool bound = mType == mapType.Visual && SCANmirage.IsMirageBody(body)
+				&& SCANmirageAtlas.Bind(compositeMaterial, body, targetWidth, mirageWindowFor(), wait, out shaded, out loading);
 			compositeMaterial.SetFloat("_MirageColor", bound ? 1f : 0f);
 			return bound;
 		}
@@ -1361,7 +1362,7 @@ namespace SCANsat.SCAN_Map
 				}
 			}
 
-			mirageWindow = new SCANmirageAtlas.Window(points);
+			mirageWindow = new SCANmirageAtlas.Window(points, this);
 			return mirageWindow;
 		}
 
