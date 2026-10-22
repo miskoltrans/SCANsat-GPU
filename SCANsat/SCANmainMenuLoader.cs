@@ -25,7 +25,7 @@ namespace SCANsat
 	[KSPAddon(KSPAddon.Startup.MainMenu, true)]
 	public class SCANmainMenuLoader : MonoBehaviour
 	{
-		private string[] Assemblies = new string[] { "SCANsatKethane", "RasterPropMonitor", "MechJeb2", "ContractConfigurator", "CC_SCANsat", "SCANmechjeb", "ModuleManager", "Kopernicus", "Kopernicus.OnDemand", "ParallaxContinued" };
+		private string[] Assemblies = new string[] { "SCANsatKethane", "RasterPropMonitor", "MechJeb2", "ContractConfigurator", "CC_SCANsat", "SCANmechjeb", "ModuleManager", "Kopernicus", "Kopernicus.OnDemand", "ParallaxContinued", "Mirage" };
 
 		internal static string SCANsatVersion = "";
 		public static bool MechJebLoaded = false;
@@ -105,6 +105,10 @@ namespace SCANsat
 					else if (alog.name == "ParallaxContinued")
 					{
 						SCANparallaxContinued.Initialize(assembly);
+					}
+					else if (alog.name == "Mirage")
+					{
+						SCANmirage.Initialize(assembly);
 					}
 				}
 			}

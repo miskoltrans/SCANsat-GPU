@@ -23,6 +23,7 @@ using KSP.Localization;
 using SCANsat.SCAN_PartModules;
 using SCANsat.SCAN_Palettes;
 using SCANsat.SCAN_Data;
+using SCANsat.SCAN_Reflection;
 using SCANsat.SCAN_UI.UI_Framework;
 using palette = SCANsat.SCAN_UI.UI_Framework.SCANcolorUtil;
 using Log = KSPCommunityLib.Logging.Log;
@@ -306,13 +307,25 @@ namespace SCANsat
 			{
 				if (body.pqsController.radiusMin == body.pqsController.radiusMax)
 				{
-					SCANlog($"[WARNING] [{body.name}] PQS controller is perfectly flat; assume this is erroneous and treat as missing data.");
+					// Mirage displaces the terrain from its own archive but declares no PQS height bounds.
+					if (SCANmirage.IsMirageBody(body))
+					{
+						return true;
+					}
+
+					// Called for every sampled pixel: warn once per body.
+					if (flatTerrainWarned.Add(body.name))
+					{
+						SCANlog($"[WARNING] [{body.name}] PQS controller is perfectly flat; assume this is erroneous and treat as missing data.");
+					}
 					return false;
 				}
 				return true;
 			}
 			return false;
 		}
+
+		private static readonly HashSet<string> flatTerrainWarned = new HashSet<string>();
 
 		/// <summary>
 		/// Generate the default SCANterrainConfig for the provided body and set / update its entry in the masterTerrainNodes.
@@ -936,6 +949,20 @@ namespace SCANsat
 
 		internal static double getElevation(CelestialBody body, double lon, double lat)
 		{
+			return getElevation(body, lon, lat, -1);
+		}
+
+		/// <summary>
+		/// Terrain height at a coordinate. mirageLevel is the archive level to sample on a Mirage body
+		/// (negative: the deepest); a map passes the level that matches its pixel size. Other bodies ignore it.
+		/// </summary>
+		internal static double getElevation(CelestialBody body, double lon, double lat, int mirageLevel)
+		{
+			if (SCANmirage.TryGetElevation(body, lon, lat, mirageLevel, out double mirageHeight))
+			{
+				return Math.Round(mirageHeight, 1);
+			}
+
 			if (!isValidPQSTerrain(body))
 			{
 				return 0;
@@ -949,6 +976,11 @@ namespace SCANsat
 
 		internal static double getElevation(CelestialBody body, int lon, int lat)
 		{
+			if (SCANmirage.TryGetElevation(body, lon, lat, -1, out double mirageHeight))
+			{
+				return Math.Round(mirageHeight, 1);
+			}
+
 			if (!isValidPQSTerrain(body))
 			{
 				return 0;
@@ -962,6 +994,11 @@ namespace SCANsat
 
 		internal static double getElevation(this CelestialBody body, Vector3d worldPosition)
 		{
+			if (SCANmirage.TryGetElevation(body, body.GetLongitude(worldPosition), body.GetLatitude(worldPosition), -1, out double mirageHeight))
+			{
+				return Math.Max(0, mirageHeight);
+			}
+
 			if (!isValidPQSTerrain(body))
 			{
 				return 0;
