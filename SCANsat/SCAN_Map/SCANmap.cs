@@ -15,6 +15,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 using SCANsat.SCAN_Data;
+using SCANsat.SCAN_Reflection;
 using SCANsat.SCAN_UI.UI_Framework;
 using SCANsat.SCAN_Unity;
 using palette = SCANsat.SCAN_UI.UI_Framework.SCANcolorUtil;
@@ -264,7 +265,8 @@ namespace SCANsat.SCAN_Map
 		{
 			passHeightSamples++;
 			float alt = 0f;
-			alt = (float)SCANUtil.getElevation(body, lon, lat);
+			// A Mirage body is sampled at the archive level that matches this map's pixel size.
+			alt = (float)SCANUtil.getElevation(body, lon, lat, SCANmirage.LevelForScale(body, mapscale));
 			if (alt == 0f)
 			{
 				alt = -0.001f;
