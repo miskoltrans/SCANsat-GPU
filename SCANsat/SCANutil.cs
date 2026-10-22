@@ -379,6 +379,9 @@ namespace SCANsat
 			return false;
 		}
 
+		// Fraction of a Mirage body's measured span added at each end of its default range
+		private const double MirageRangePad = 0.1;
+
 		public static SCANterrainConfig generateTerrainConfig(CelestialBody b)
 		{
 			// Every body gets a config, PQS or not: the map, legend and colour-UI paths all assume one
@@ -400,7 +403,26 @@ namespace SCANsat
 				return authored;
 			}
 
-			if (b.pqsController == null)
+			if (SCANmirage.TryGetDeclaredRange(b, out double declaredMin, out double declaredMax))
+			{
+				// Mirage declares no PQS bounds. Its PQSMod's span is the most the terrain can take; the archive's
+				// coarsest tiles show what it does take, padded because coarse texels average the peaks and floors
+				// away (Sol's Mars spans 8.7 to 27 km of a declared 0 to 30.4).
+				double min = declaredMin, max = declaredMax;
+				string source = "declared span";
+				if (SCANmirage.TryMeasureRange(b, out double dataMin, out double dataMax))
+				{
+					double pad = (dataMax - dataMin) * MirageRangePad;
+					min = Math.Max(declaredMin, dataMin - pad);
+					max = Math.Min(declaredMax, dataMax + pad);
+					source = string.Format("archive {0:F0} m to {1:F0} m, padded", dataMin, dataMax);
+				}
+
+				newMin = ((float)min).Mathf_Round(-1);
+				newMax = ((float)max).Mathf_Round(-1);
+				SCANlog("[{0}] terrain range from Mirage ({1}): {2:F0} m to {3:F0} m", b.name, source, newMin, newMax);
+			}
+			else if (b.pqsController == null)
 			{
 				// Gas giants and other PQS-less bodies: nothing to measure, defaults apply (logged below).
 			}
