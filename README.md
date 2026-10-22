@@ -185,6 +185,12 @@ SCANSAT_BODY_TEXTURES
 
 With these paths defined, SCANsat loads a single mip level of each file straight to the GPU through KSPTextureLoader - the smallest level that still covers the open map - so RAM use does not grow with texture size, and Kopernicus OnDemand is never asked to load the body's full ScaledSpace textures just to draw a map. Bodies without a config fall back to their ScaledSpace textures. SCANsat ships configs for Real Solar System (`Patches/RSS_BodyTextures.cfg`); planet pack makers are encouraged to ship their own, as this directly specifies the textures SCANsat will display in game.
 
+Bodies rendered by **Mirage** (ballisticfox's terrain and virtual-texture mod, used by Sol) need no config. SCANsat finds Mirage at runtime and reads their terrain through Mirage's own tile reader:
+
+* **Altimetry** and **Slope** sample Mirage's height tiles at the level that matches the map's pixel size.
+* **Visual** draws Mirage's colour tiles, shaded by its normal tiles, on the GPU. The zoom map and RPM screens fetch the tiles under their window at their own level, down to the deepest level installed; the PNG export waits for the level its width needs.
+* Without Mirage, every body is mapped as before. If a Mirage update changes what SCANsat calls, SCANsat logs an error and falls back: Visual to the body's other sources (a SCANSAT\_BODY\_TEXTURES config, then its ScaledSpace textures), Altimetry and Slope to KSP's terrain (PQS), which on Mirage bodies may read flat.
+
 #### [:top:][top] 1d. Other Add-Ons 
 
 S.C.A.N. is proud to collaborate with other KSP mods and modding teams. Following is a table of all of the mods, add-ons, or software that we interoperate with.
@@ -197,7 +203,7 @@ S.C.A.N. is proud to collaborate with other KSP mods and modding teams. Followin
 [**RasterPropMonitor**][rpm:release]  | 
 [**KSPTextureLoader**][ksptl:release]  | 
 
- **MM**, **RPM**, **MechJeb** and **Toolbar** are all **soft** dependencies. This means your experience with SCANsat will be enhanced if you are using these mods, but they are not necessary.
+ **MM**, **RPM**, **MechJeb**, **Toolbar** and **Mirage** are all **soft** dependencies. This means your experience with SCANsat will be enhanced if you are using these mods, but they are not necessary.
 
 **KSPTextureLoader** is a built dependency, however, as all planets that have external texture files are strongly recommended to use memory mapped textures, with RAM cached variants only being a fallback. This ensures that no errors occur with shader configs and that the exact texture desired ends up displayed in game.
 

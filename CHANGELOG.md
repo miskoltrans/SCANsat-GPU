@@ -1,5 +1,14 @@
 # SCANsat Changelog
 
+## Unreleased
+
+* Mirage support (ballisticfox's terrain and virtual-texture mod for Sol). Mirage is optional: SCANsat looks for it at runtime, and without it every body is mapped as before. If a Mirage update changes what SCANsat calls, SCANsat logs an error and falls back to the body's other sources
+* Altimetry and Slope work on Mirage bodies, which drew blank before (their PQS reports a flat height range). Heights come straight from Mirage's height tiles at the level that matches the map's pixel size, so they match the rendered terrain, and maps drawn under time warp are no coarser than at 1x. The terrain colour range defaults to the body's range from its coarsest tiles
+* Visual maps of Mirage bodies are drawn on the GPU from Mirage's colour tiles, shaded by its normal tiles. The tiles are read on a worker thread; the coarsest level stands in until they land
+* Zoom maps and RPM screens fetch the tiles under their window at their own level, down to the deepest level installed, so zooming in sharpens the Visual map instead of magnifying one level
+* The Visual PNG export of a Mirage body waits for the deeper tiles its width needs
+* Mirage tiles are released when leaving the scene
+
 ## 22.1 - 2026/10/12
 
 * Add NullReference fix for bodies with no anomaly sites (#462).
