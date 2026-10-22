@@ -21,12 +21,10 @@ using UnityEngine;
 using System.Linq;
 using KSP.Localization;
 using SCANsat.SCAN_PartModules;
-using SCANsat.SCAN_Platform;
 using SCANsat.SCAN_Palettes;
 using SCANsat.SCAN_Data;
 using SCANsat.SCAN_UI.UI_Framework;
 using palette = SCANsat.SCAN_UI.UI_Framework.SCANcolorUtil;
-using SCANsat.SCAN_Unity;
 using Log = KSPCommunityLib.Logging.Log;
 
 namespace SCANsat
