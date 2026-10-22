@@ -1318,9 +1318,62 @@ namespace SCANsat.SCAN_Map
 		private bool bindMirage(int targetWidth, bool wait, out bool shaded, out bool loading)
 		{
 			shaded = loading = false;
-			bool bound = mType == mapType.Visual && SCANmirageAtlas.Bind(compositeMaterial, body, targetWidth, wait, out shaded, out loading);
+			bool bound = mType == mapType.Visual && SCANmirageAtlas.Bind(compositeMaterial, body, targetWidth, mirageWindowFor(), wait, out shaded, out loading);
 			compositeMaterial.SetFloat("_MirageColor", bound ? 1f : 0f);
 			return bound;
+		}
+
+		// The ground a window map shows, for the Mirage atlas to fetch the tiles under it at the map's scale:
+		// every 8th pixel of every 8th row and the last row and column, closer than a tile at any level the
+		// scale picks. Null for a map of the whole body. Rebuilt when the framing changes.
+		private SCANmirageAtlas.Window mirageWindow;
+		private readonly double[] mirageWindowFraming = new double[8];
+
+		private SCANmirageAtlas.Window mirageWindowFor()
+		{
+			if (profile.GeographicCache || mapwidth <= 0 || mapheight <= 0)
+			{
+				return null;
+			}
+
+			double[] framing = { mapwidth, mapheight, mapscale, lon_offset, lat_offset, (int)projection, centeredLong, centeredLat };
+			bool same = mirageWindow != null;
+			for (int k = 0; k < framing.Length; k++)
+			{
+				same &= framing[k] == mirageWindowFraming[k];
+				mirageWindowFraming[k] = framing[k];
+			}
+
+			if (same)
+			{
+				return mirageWindow;
+			}
+
+			List<Vector2d> points = new List<Vector2d>();
+			for (int row = 0; row < mapheight + 7; row += 8)
+			{
+				for (int i = 0; i < mapwidth + 7; i += 8)
+				{
+					if (pixelLonLat(Math.Min(i, mapwidth - 1), Math.Min(row, mapheight - 1), out double lon, out double lat))
+					{
+						points.Add(new Vector2d(lon, lat));
+					}
+				}
+			}
+
+			mirageWindow = new SCANmirageAtlas.Window(points);
+			return mirageWindow;
+		}
+
+		// A window map's pixel (column, row from the bottom) to the lon/lat it shows, as its data caches are
+		// filled; false off the map (outside a projection's disc).
+		internal bool pixelLonLat(int i, int row, out double lon, out double lat)
+		{
+			double rawLon = (i * 1.0f / mapscale) - 180f + lon_offset;
+			double rawLat = (row * 1.0f / mapscale) - 90f + lat_offset;
+			lat = unprojectLatitude(rawLon, rawLat);
+			lon = unprojectLongitude(rawLon, rawLat);
+			return !(double.IsNaN(lat) || double.IsNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180);
 		}
 
 		// The big map's graticule as a texture for the UI's grid layer, which sits above the map with
