@@ -54,7 +54,7 @@ namespace SCANsat.SCAN_Reflection
 			internal int maxLevel;
 			internal int tileSize = DefaultTileSize;
 			internal int lastAttempt = -1;
-			internal bool broken;
+			internal bool broken, logged;
 		}
 
 		// A null value marks a body already looked at that is not a Mirage body.
@@ -349,7 +349,13 @@ namespace SCANsat.SCAN_Reflection
 				release(layerOrder[0]);
 			}
 
-			Log.Message($"Mirage height layer for {mb.name}: levels 0-{mb.maxLevel}, {mb.tileSize} px tiles");
+			// An evicted layer is rebuilt on demand; report each body once.
+			if (!mb.logged)
+			{
+				mb.logged = true;
+				Log.Message($"Mirage height layer for {mb.name}: levels 0-{mb.maxLevel}, {mb.tileSize} px tiles");
+			}
+
 			return true;
 		}
 
