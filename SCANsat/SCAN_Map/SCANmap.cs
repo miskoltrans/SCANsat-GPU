@@ -1213,8 +1213,11 @@ namespace SCANsat.SCAN_Map
 
 			Texture colorTex = null, normalTex = null, gasRamp = null;
 			int normalYChannel = 0;
+			// Only Visual draws from the body's own textures. Asked for in every mode, they cost a body with
+			// Parallax's scaled shader a reload of its textures on every composite of the pass: Parallax
+			// unloads an off-screen body's at once, ~200 ms a frame on Sol's Venus.
 			bool mirage = bindMirage(visualTargetWidth(), false, out bool mirageShaded, out bool mirageLoading);
-			if (!mirage)
+			if (!mirage && mType == mapType.Visual)
 			{
 				SCANcontroller.controller.getVisualSource(body, visualTargetWidth(), out colorTex, out normalTex, out normalYChannel, out gasRamp, out _);
 			}
