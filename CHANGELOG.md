@@ -8,6 +8,9 @@
 * Zoom maps and RPM screens fetch the tiles under their window at their own level, down to the deepest level installed, so zooming in sharpens the Visual map instead of magnifying one level
 * The Visual PNG export of a Mirage body waits for the deeper tiles its width needs
 * Mirage tiles are released when leaving the scene
+* Zoom maps and RPM screens of Mirage bodies draw Altimetry, Slope and Biome in about a tenth of a second: their heights and biomes are drawn on the GPU from Mirage's height tiles and Kopernicus's biome map, instead of sampled pixel by pixel. With the Scanline Speed setting on Instant, panning and zooming redraw at once
+* Fixed maps of bodies on Parallax's scaled shader (Sol's Mercury, Venus and others) stuttering at a few frames a second while they built: every frame reloaded the body's textures, in every map mode. Altimetry on Sol's Venus took 25 seconds; it takes one
+* Building maps keep to the per-frame budget on bodies whose terrain is slow to sample
 
 ## 22.1 - 2026/10/12
 
