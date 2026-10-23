@@ -1404,6 +1404,7 @@ namespace SCANsat
 			}
 
 			SCANmirageAtlas.ReleaseAll();
+			SCANmap.ReleaseBiomeTextures();
 			SCANmirage.ReleaseAll();
 		}
 

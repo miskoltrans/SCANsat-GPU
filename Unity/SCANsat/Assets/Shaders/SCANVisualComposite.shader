@@ -118,12 +118,19 @@ Shader "Hidden/SCANsat/VisualComposite"
 			float _MirageHeightOffset;
 			// Where the height pass's pixels are, from SCANmap in double: each column's and row's raw coordinate
 			// (r cos, g sin, b degrees; a column's a: 1 where |cos| beats |sin|, for the face tie), and an
-			// orthographic window's centre, east and north. The GPU's own trig is tenths of a texel out.
+			// orthographic window's centre, east and north. The GPU's own trig is tenths of a texel out. A table's
+			// second row: the biome map texel the column's longitude (r) or the row's latitude (r) falls on, and
+			// for a row past a pole (g = 1) the longitude half the map round.
 			sampler2D _HeightColumns;
 			sampler2D _HeightRows;
+			// Kopernicus's biome map, a biome index per texel (R8); x = width, y = height, z = biomes, w = 1 to
+			// look them up
+			sampler2D _BiomeMap;
+			float4 _BiomeMapSize;
 			float4 _OrthoCentre;
 			float4 _OrthoEast;
 			float4 _OrthoNorth;
+			float4 _OrthoMeridian;   // the equator under the centre: (cos lon, 0, sin lon)
 
 			// Altimetry / Slope
 			float _TerrainMin;      // LUT domain min (metres)
@@ -829,7 +836,8 @@ Shader "Hidden/SCANsat/VisualComposite"
 		// Pass 1: a Mirage body's heights for the map, one texel per map pixel, which SCANmap reads back into
 		// its height cache instead of sampling them on the CPU. r: the height in metres as
 		// SCANUtil.getElevation gives it (rounded to 0.1 m), a true 0 m as -0.001 since 0 means unsampled;
-		// g: 1 where Altimetry is scanned, 0 where not, -1 off the map. A pixel's coordinate is the CPU
+		// g: 1 where Altimetry is scanned, 0 where not, -1 off the map; b: the biome as
+		// SCANUtil.getBiomeIndexFraction gives it, when _BiomeMapSize.w is set. A pixel's coordinate is the CPU
 		// cache's: the raw grid itself for a geographic cache (the big map), unprojected for a pixel-space
 		// one, at the pixel's index rather than its centre.
 		Pass
@@ -839,10 +847,62 @@ Shader "Hidden/SCANsat/VisualComposite"
 			#pragma fragment fragHeights
 			#pragma target 3.0
 
+			float biomeTexel(float x, float y)
+			{
+				return floor(tex2Dlod(_BiomeMap, float4((x + 0.5) / _BiomeMapSize.x, (y + 0.5) / _BiomeMapSize.y, 0.0, 0.0)).r * 255.0 + 0.5);
+			}
+
+			// The biome at a point of the biome map, in texels, the way Kopernicus's GetAtt picks it: the four
+			// texels' biome indices, and where they differ the one nearest their bilinear blend (the first in
+			// (min, min), (max, min), (min, max), (max, max) order on a tie). As a fraction of the biome count.
+			float biomeAt(float cx, float cy)
+			{
+				float minX = floor(cx);
+				float minY = floor(cy);
+				float midX = cx - minX;
+				float midY = cy - minY;
+				float maxX = minX + 1.0 >= _BiomeMapSize.x ? 0.0 : minX + 1.0;
+				float maxY = min(minY + 1.0, _BiomeMapSize.y - 1.0);
+				float b1 = biomeTexel(minX, minY);
+				float b2 = biomeTexel(maxX, minY);
+				float b3 = biomeTexel(minX, maxY);
+				float b4 = biomeTexel(maxX, maxY);
+				float b = b1;
+				if (!(b1 == b2 && b1 == b3 && b1 == b4))
+				{
+					float rowA = b1 + (b2 - b1) * midX;
+					float rowB = b3 + (b4 - b3) * midX;
+					float blend = rowA + (rowB - rowA) * midY;
+					float best = (b1 - blend) * (b1 - blend);
+					float d2 = (b2 - blend) * (b2 - blend);
+					if (d2 < best) { best = d2; b = b2; }
+					d2 = (b3 - blend) * (b3 - blend);
+					if (d2 < best) { best = d2; b = b3; }
+					d2 = (b4 - blend) * (b4 - blend);
+					if (d2 < best) { b = b4; }
+				}
+
+				return b / _BiomeMapSize.z;
+			}
+
+			// A lon/lat in degrees to biome map texels, as GetAtt and GetBilinearCoordinates make them
+			// (in degrees, which loses less than radians would: the turn from 90 E, then the map's x)
+			float2 biomeCoords(float lon, float lat)
+			{
+				float turn = (lon - 90.0) / 360.0;
+				turn -= floor(turn);
+				float x = 1.0 - turn;
+				x = abs(x - floor(x));
+				float y = lat / 180.0 + 0.5;
+				y = y >= 1.0 ? 0.99999994 : max(y, 0.0);
+				return float2(x * _BiomeMapSize.x, y * _BiomeMapSize.y);
+			}
+
 			float4 fragHeights(v2f_img i) : SV_Target
 			{
-				float4 column = tex2Dlod(_HeightColumns, float4(i.uv.x, 0.5, 0.0, 0.0));
-				float4 row = tex2Dlod(_HeightRows, float4(i.uv.y, 0.5, 0.0, 0.0));
+				float4 column = tex2Dlod(_HeightColumns, float4(i.uv.x, 0.25, 0.0, 0.0));
+				float4 row = tex2Dlod(_HeightRows, float4(i.uv.y, 0.25, 0.0, 0.0));
+				float2 biomeAtTables = float2(-1.0, -1.0);
 				float rawLon = column.b;
 				float rawLat = row.b;
 				float lon = rawLon;
@@ -859,8 +919,16 @@ Shader "Hidden/SCANsat/VisualComposite"
 					if (!(rho2 <= 1.0))
 						return float4(0.0, -1.0, 0.0, 0.0);
 					d = sqrt(1.0 - rho2) * _OrthoCentre.xyz + x * _OrthoEast.xyz + y * _OrthoNorth.xyz;
-					lat = asin(clamp(d.y, -1.0, 1.0)) * RAD2DEG;
-					lon = atan2(d.z, d.x) * RAD2DEG;
+					// Its longitude as an angle from the centre's, small, so atan2 keeps it to float precision
+					// (the biome map's borders need it), and its latitude against the distance from the axis
+					float along = dot(d, _OrthoMeridian.xyz);
+					float east = dot(d, _OrthoEast.xyz);
+					lon = _CenteredLon + atan2(east, along) * RAD2DEG;
+					lat = atan2(d.y, sqrt(along * along + east * east)) * RAD2DEG;
+					if (lon >= 180.0)
+						lon -= 360.0;
+					else if (lon < -180.0)
+						lon += 360.0;
 				}
 				else if (_PixelSpace > 0.5 && _Projection > 0.5)
 				{
@@ -878,6 +946,9 @@ Shader "Hidden/SCANsat/VisualComposite"
 					d = float3(row.r * column.r, row.g, row.r * column.g);
 					xTie = column.a;
 					wrapRaw(lon, lat);
+					float4 columnBiome = tex2Dlod(_HeightColumns, float4(i.uv.x, 0.75, 0.0, 0.0));
+					float4 rowBiome = tex2Dlod(_HeightRows, float4(i.uv.y, 0.75, 0.0, 0.0));
+					biomeAtTables = float2(rowBiome.g > 0.5 ? fmod(columnBiome.r + _BiomeMapSize.x * 0.5, _BiomeMapSize.x) : columnBiome.r, rowBiome.r);
 				}
 
 				float ilon = fmod(floor(lon + 540.0), 360.0);
@@ -888,7 +959,15 @@ Shader "Hidden/SCANsat/VisualComposite"
 				float m = round((_MirageHeightOffset + _MirageHeightScale * mirageHeight(d, xTie)) * 10.0) * 0.1;
 				if (m == 0.0)
 					m = -0.001;
-				return float4(m, scanned, 0.0, 0.0);
+
+				float biome = 0.0;
+				if (_BiomeMapSize.w > 0.5)
+				{
+					float2 c = biomeAtTables.x >= 0.0 ? biomeAtTables : biomeCoords(lon, lat);
+					biome = biomeAt(c.x, c.y);
+				}
+
+				return float4(m, scanned, biome, 0.0);
 			}
 			ENDCG
 		}
