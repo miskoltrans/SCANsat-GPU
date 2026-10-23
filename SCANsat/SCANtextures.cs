@@ -105,9 +105,11 @@ namespace SCANsat
 			}
 		}
 
-		/// <summary>True when a SCANSAT_BODY_TEXTURES node declares a colorMap for the body (cached from GameDatabase).</summary>
-		/// Declarative only - whether the file actually loads is another matter, so the OnDemand paths
-		/// ask UseConfigFor, not this.
+		/// <summary>True when a SCANSAT_BODY_TEXTURES node declares a colorMap for the body and the file is there (cached from GameDatabase).</summary>
+		/// Whether the file actually loads is another matter, so the OnDemand paths ask UseConfigFor, not
+		/// this. A declared file the install does not have is no source at all: Sol's Mirage build ships
+		/// no colour map for the bodies Mirage draws, and those need their ScaledSpace textures paged in
+		/// like any other body.
 		public static bool HasConfigFor(CelestialBody b)
 		{
 			if (b == null)
@@ -120,12 +122,14 @@ namespace SCANsat
 				configuredBodies = new HashSet<string>();
 
 				ConfigNode[] nodes = GameDatabase.Instance.GetConfigNodes("SCANSAT_BODY_TEXTURES");
+				string gameDataFolder = Directory.GetParent(KSPUtil.ApplicationRootPath).FullName + "/GameData/";
 
 				for (int i = 0; i < nodes.Length; i++)
 				{
 					string name = nodes[i].GetValue("name");
+					string colorMap = nodes[i].GetValue("colorMap");
 
-					if (!string.IsNullOrEmpty(name) && nodes[i].HasValue("colorMap"))
+					if (!string.IsNullOrEmpty(name) && !string.IsNullOrEmpty(colorMap) && File.Exists(gameDataFolder + colorMap))
 					{
 						configuredBodies.Add(name);
 					}
