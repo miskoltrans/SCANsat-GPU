@@ -637,6 +637,10 @@ namespace SCANsat.SCAN_Map
 
 			if (coverageFlags != null) { UnityEngine.Object.Destroy(coverageFlags); coverageFlags = null; }
 			if (compositeMaterial != null) { UnityEngine.Object.Destroy(compositeMaterial); compositeMaterial = null; }
+			if (heightMaterial != null) { UnityEngine.Object.Destroy(heightMaterial); heightMaterial = null; }
+			if (heightTex != null) { heightTex.Release(); UnityEngine.Object.Destroy(heightTex); heightTex = null; }
+			if (heightColumns != null) { UnityEngine.Object.Destroy(heightColumns); heightColumns = null; }
+			if (heightRows != null) { UnityEngine.Object.Destroy(heightRows); heightRows = null; }
 			if (visualRenderTex != null) { visualRenderTex.Release(); UnityEngine.Object.Destroy(visualRenderTex); visualRenderTex = null; }
 			if (exporter != null) { UnityEngine.Object.Destroy(exporter.gameObject); exporter = null; }
 			if (elevationTex != null) { UnityEngine.Object.Destroy(elevationTex); elevationTex = null; }
@@ -862,6 +866,18 @@ namespace SCANsat.SCAN_Map
 			private float passBuildStart = -1f;
 			private float passBuildMs;
 			private double passSlowestBuildMs, passSlowestCompositeMs;   // the longest frame's two halves
+
+			// A Mirage body's heights for a data pass, drawn from Mirage's height tiles by the composite shader's
+			// height pass and read back into big_heightmap in one go, instead of sampled pixel by pixel on the CPU
+			// (pumpGpuHeights). Off: the CPU samples them, as for every other body.
+			private enum GpuHeights { Off, Binding, Reading, Done }
+			private GpuHeights gpuHeights;
+			private Material heightMaterial;
+			private RenderTexture heightTex;
+			private Texture2D heightColumns, heightRows;   // setHeightCoordinates
+			private UnityEngine.Rendering.AsyncGPUReadbackRequest heightRead;
+			// The harness turns it off to hold the GPU's heights against the CPU's
+			internal static bool GpuHeightsAllowed = true;
 			private Color[] gpuRowBuf;
 			private CacheKey resourceGridKey;   // the field resourceCache was sampled from
 			private CacheKey resourceTexKey;    // the grid resourceTex was uploaded from
@@ -998,6 +1014,7 @@ namespace SCANsat.SCAN_Map
 			sweepStart = -1f;
 			rangeRow = -1;
 			rowCol = 0;
+			gpuHeights = GpuHeights.Off;
 			noiseSeed = UnityEngine.Random.value;
 			passHeightSamples = 0;
 			passBiomeSamples = 0;
@@ -1079,6 +1096,10 @@ namespace SCANsat.SCAN_Map
 					dataTexKey.Invalidate();
 					pendingDataKey = configHash;
 					mapstep = 0;
+					if (wantsGpuHeights())
+					{
+						gpuHeights = GpuHeights.Binding;
+					}
 				}
 			}
 		}
@@ -1312,7 +1333,7 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetColor("_RedlineColor", palette.Red);
 			compositeMaterial.SetFloat("_SweepY", reveal);
 
-			Graphics.Blit(null, visualRenderTex, compositeMaterial);
+			Graphics.Blit(null, visualRenderTex, compositeMaterial, 0);   // pass 0 only: with no pass given Blit draws every pass, the height pass over the map
 
 			// That Blit was the fully revealed one (no redline). Mirage tiles still streaming in hold the pass
 			// open, so the pump composites again as they land.
@@ -1607,7 +1628,7 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetFloat("_GasGiant", gasRamp != null ? 1f : 0f);
 			setFramingUniforms(w, h, mapscale * k);
 
-			Graphics.Blit(null, rt, compositeMaterial);
+			Graphics.Blit(null, rt, compositeMaterial, 0);
 
 			SCANUtil.SCANlog("[{0}] Visual export rendered at {1}x{2} (on-screen {3}x{4})", body.bodyName, w, h, mapwidth, mapheight);
 			return rt;
@@ -2334,7 +2355,7 @@ namespace SCANsat.SCAN_Map
 
 			setFramingUniforms(w, h, mapscale * w / mapwidth);
 
-			Graphics.Blit(null, rt, compositeMaterial);
+			Graphics.Blit(null, rt, compositeMaterial, 0);
 			return rt;
 		}
 
@@ -2496,6 +2517,208 @@ namespace SCANsat.SCAN_Map
 			return true;
 		}
 
+		// Whether a data pass about to build takes its heights from the GPU: a Mirage body, a mode that samples
+		// elevation the way prepRow does (not the prebuilt 1-degree grid), and a shader with the height pass
+		private bool wantsGpuHeights()
+		{
+			bool wantElev = mType == mapType.Altimetry || mType == mapType.Slope || (mType == mapType.Biome && profile.BiomeUnderlay);
+			if (!GpuHeightsAllowed || !wantElev || !pqs || big_heightmap == null || heightGridPass || profile.PlanetUV
+				|| !SCANmirage.IsMirageBody(body) || !SystemInfo.SupportsRenderTextureFormat(RenderTextureFormat.RGFloat))
+			{
+				return false;
+			}
+
+			Shader shader = SCAN_UI_Loader.VisualCompositeShader;
+			if (shader == null)
+			{
+				return false;
+			}
+
+			if (heightMaterial == null || heightMaterial.shader != shader)
+			{
+				if (heightMaterial != null) { UnityEngine.Object.Destroy(heightMaterial); }
+				heightMaterial = new Material(shader);
+			}
+
+			return heightMaterial.passCount > 1;   // a shader bundle from before the height pass has one
+		}
+
+		// One frame of the GPU height pass. True once the heights are in big_heightmap, or once it has handed
+		// them back to the CPU (Off): no height tiles the GPU can read, or not at the level the CPU would sample.
+		private bool pumpGpuHeights()
+		{
+			if (gpuHeights == GpuHeights.Binding)
+			{
+				if (!SCANmirageAtlas.BindHeights(heightMaterial, body, Mathf.RoundToInt((float)(360 * mapscale)), mirageWindowFor(), out bool loading, out int level)
+					|| level != SCANmirage.LevelForScale(body, mapscale))
+				{
+					gpuHeights = GpuHeights.Off;
+					return true;
+				}
+
+				if (loading)
+				{
+					return false;   // tiles still landing
+				}
+
+				if (heightTex == null || heightTex.width != mapwidth || heightTex.height != mapheight)
+				{
+					if (heightTex != null) { heightTex.Release(); UnityEngine.Object.Destroy(heightTex); }
+					heightTex = new RenderTexture(mapwidth, mapheight, 0, RenderTextureFormat.RGFloat, RenderTextureReadWrite.Linear)
+					{
+						filterMode = FilterMode.Point,
+						wrapMode = TextureWrapMode.Clamp,
+					};
+					heightTex.Create();
+				}
+
+				updateCoverageFlags();
+				heightMaterial.SetTexture("_CoverageFlags", coverageFlags);
+				heightMaterial.SetFloat("_MapWidth", mapwidth);
+				heightMaterial.SetFloat("_MapHeight", mapheight);
+				heightMaterial.SetFloat("_MapScale", (float)mapscale);
+				heightMaterial.SetFloat("_LonOffset", (float)lon_offset);
+				heightMaterial.SetFloat("_LatOffset", (float)lat_offset);
+				heightMaterial.SetFloat("_Projection", (float)(int)projection);
+				heightMaterial.SetFloat("_CenteredLon", (float)centeredLong);
+				heightMaterial.SetFloat("_CenteredLat", (float)centeredLat);
+				heightMaterial.SetFloat("_PixelSpace", profile.GeographicCache ? 0f : 1f);
+				setHeightCoordinates();
+				Graphics.Blit(null, heightTex, heightMaterial, 1);
+
+				if (!SystemInfo.supportsAsyncGPUReadback)
+				{
+					// Read it back at once instead: a stall of a few milliseconds, once a pass
+					Texture2D read = new Texture2D(mapwidth, mapheight, TextureFormat.RGFloat, false, true);
+					RenderTexture prev = RenderTexture.active;
+					RenderTexture.active = heightTex;
+					read.ReadPixels(new Rect(0, 0, mapwidth, mapheight), 0, 0, false);
+					RenderTexture.active = prev;
+					fillHeights(read.GetRawTextureData<float>());
+					UnityEngine.Object.Destroy(read);
+					gpuHeights = GpuHeights.Done;
+					return true;
+				}
+
+				heightRead = UnityEngine.Rendering.AsyncGPUReadback.Request(heightTex);
+				gpuHeights = GpuHeights.Reading;
+				return false;
+			}
+
+			if (gpuHeights == GpuHeights.Reading)
+			{
+				if (!heightRead.done)
+				{
+					return false;
+				}
+
+				if (heightRead.hasError)
+				{
+					gpuHeights = GpuHeights.Off;
+					return true;
+				}
+
+				fillHeights(heightRead.GetData<float>());
+				gpuHeights = GpuHeights.Done;
+			}
+
+			return true;
+		}
+
+		// Where the height pass's pixels are, worked out here in double as prepRow does: the GPU's own sin, cos
+		// and inverse trig put a steep slope's heights tenths of a texel out. Each column's raw longitude and
+		// each row's raw latitude, with their cos and sin (and for a column which of |cos| and |sin| is larger,
+		// for the cube-face tie the float direction loses), and an orthographic window's centre and the east
+		// and north there, which turn its plane points into directions with no trig at all.
+		private void setHeightCoordinates()
+		{
+			Color[] columns = new Color[mapwidth];
+			for (int i = 0; i < mapwidth; i++)
+			{
+				double raw = (i * 1.0f / mapscale) - 180f + lon_offset;
+				double r = Mathf.Deg2Rad * raw;
+				double c = Math.Cos(r), s = Math.Sin(r);
+				columns[i] = new Color((float)c, (float)s, (float)raw, Math.Abs(c) >= Math.Abs(s) ? 1f : 0f);
+			}
+
+			Color[] rows = new Color[mapheight];
+			for (int j = 0; j < mapheight; j++)
+			{
+				double raw = (j * 1.0f / mapscale) - 90f + lat_offset;
+				double r = Mathf.Deg2Rad * raw;
+				rows[j] = new Color((float)Math.Cos(r), (float)Math.Sin(r), (float)raw, 0f);
+			}
+
+			heightMaterial.SetTexture("_HeightColumns", coordinateTable(ref heightColumns, columns));
+			heightMaterial.SetTexture("_HeightRows", coordinateTable(ref heightRows, rows));
+
+			double lon0 = Mathf.Deg2Rad * centeredLong, lat0 = Mathf.Deg2Rad * centeredLat;
+			heightMaterial.SetVector("_OrthoCentre", new Vector4((float)(Math.Cos(lat0) * Math.Cos(lon0)), (float)Math.Sin(lat0), (float)(Math.Cos(lat0) * Math.Sin(lon0)), 0f));
+			heightMaterial.SetVector("_OrthoEast", new Vector4((float)-Math.Sin(lon0), 0f, (float)Math.Cos(lon0), 0f));
+			heightMaterial.SetVector("_OrthoNorth", new Vector4((float)(-Math.Sin(lat0) * Math.Cos(lon0)), (float)Math.Cos(lat0), (float)(-Math.Sin(lat0) * Math.Sin(lon0)), 0f));
+		}
+
+		private static Texture2D coordinateTable(ref Texture2D table, Color[] texels)
+		{
+			if (table == null || table.width != texels.Length)
+			{
+				if (table != null) { UnityEngine.Object.Destroy(table); }
+				table = new Texture2D(texels.Length, 1, TextureFormat.RGBAFloat, false, true)
+				{
+					filterMode = FilterMode.Point,
+					wrapMode = TextureWrapMode.Clamp,
+				};
+			}
+
+			table.SetPixels(texels);
+			table.Apply(false);
+			return table;
+		}
+
+		// The height pass's texels (height, scanned) into big_heightmap as the CPU would have left it: where
+		// Altimetry is scanned (prepRow), and at the auto-range pre-pass's every 4th pixel of every 4th row,
+		// scanned or not (preSampleRangeRow) - whose range is fitted here too, from those pixels, as there.
+		// Off the map stays 0.
+		private void fillHeights(global::Unity.Collections.NativeArray<float> texels)
+		{
+			bool range = profile.AutoRange && (mType == mapType.Altimetry || mType == mapType.Biome) && rangeRow < mapheight;
+			if (range)
+			{
+				rangeMin = float.MaxValue;
+				rangeMax = float.MinValue;
+				rangeSamples = 0;
+			}
+
+			for (int row = Math.Max(0, startLine); row <= stopLine && row < mapheight; row++)
+			{
+				for (int i = 0; i < mapwidth; i++)
+				{
+					int k = 2 * (row * mapwidth + i);
+					float h = texels[k], scanned = texels[k + 1];
+					bool rangeCell = range && scanned > -0.5f && (row & 3) == 0 && (i & 3) == 0;
+					if (scanned > 0.5f || rangeCell)
+					{
+						big_heightmap[i, row] = h;
+						passHeightSamples++;
+					}
+
+					if (rangeCell)
+					{
+						float v = h == -0.001f ? 0f : h;
+						if (v < rangeMin) { rangeMin = v; }
+						if (v > rangeMax) { rangeMax = v; }
+						rangeSamples++;
+					}
+				}
+			}
+
+			if (range)
+			{
+				rangeRow = mapheight;
+				applyAutoTerrainRange();
+			}
+		}
+
 		// One frame's slice of a data pass (Altimetry / Slope / Biome): rows sampled under the per-frame
 		// CPU budget shared by every building map, staged into the data textures, each texture uploaded
 		// once. Only called with rows left to build. Returns false while the auto-range pre-pass is
@@ -2517,6 +2740,13 @@ namespace SCANsat.SCAN_Map
 				passBuildStart = Time.realtimeSinceStartup;
 			}
 			passBuildFrames++;
+
+			// A Mirage body's heights come off the GPU in one go; nothing to show until they are in
+			if (gpuHeights != GpuHeights.Off && gpuHeights != GpuHeights.Done && !pumpGpuHeights())
+			{
+				reportBuildBudgetUsed(System.Diagnostics.Stopwatch.GetTimestamp() - start);
+				return false;
+			}
 
 			// Auto range (zoom map, RPM): before any row is built or revealed, sample every 4th pixel of
 			// the window into the cache and fit the palette range to what is there - what the windows'
@@ -2670,9 +2900,9 @@ namespace SCANsat.SCAN_Map
 			}
 			else if (passBuildStart >= 0f)
 			{
-				SCANUtil.SCANlog("[{0}] {1} GPU pass {2}x{3}: build {4} frames / {5:F0} ms ({6} height samples, {7} biome lookups), pass total {8:F2} s, longest build {9:F1} ms, longest composite {10:F1} ms",
+				SCANUtil.SCANlog("[{0}] {1} GPU pass {2}x{3}: build {4} frames / {5:F0} ms ({6} height samples{11}, {7} biome lookups), pass total {8:F2} s, longest build {9:F1} ms, longest composite {10:F1} ms",
 					body.bodyName, mType, mapwidth, mapheight, passBuildFrames, passBuildMs, passHeightSamples, passBiomeSamples, Time.realtimeSinceStartup - passBuildStart,
-					passSlowestBuildMs, passSlowestCompositeMs);
+					passSlowestBuildMs, passSlowestCompositeMs, gpuHeights == GpuHeights.Done ? " from the GPU" : "");
 				passBuildStart = -1f;   // one line per pass
 			}
 		}

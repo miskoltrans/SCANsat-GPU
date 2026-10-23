@@ -59,14 +59,9 @@ Shader "Hidden/SCANsat/VisualComposite"
 	{
 		Cull Off ZWrite Off ZTest Always
 
-		Pass
-		{
-			CGPROGRAM
-			#pragma vertex vert_img
-			#pragma fragment frag
-			// tex2Dgrad / tex2Dlod below: shader model 3.0. Without this Unity assumes 2.5
-			// (D3D11 ps_4_0_level_9_3), which has neither.
-			#pragma target 3.0
+		// Uniforms and helpers of both passes. A pass compiles only what it uses, so the height pass's few
+		// samplers do not count against the map pass's limit (16 on D3D11 and Metal, all taken).
+		CGINCLUDE
 			#include "UnityCG.cginc"
 
 			sampler2D _ScaledColor;
@@ -117,6 +112,18 @@ Shader "Hidden/SCANsat/VisualComposite"
 			sampler2D _MirageDetailIndirection;
 			float _MirageDetailLevel;            // tiles per face edge at the window's level
 			float4 _MirageDetailAtlas;           // x = slots per atlas row, y = 1 / atlas px
+			// The height pass binds a body's height atlases to the same names; a tile holds fractions of the
+			// PQSMod's span: offset + scale * h metres
+			float _MirageHeightScale;
+			float _MirageHeightOffset;
+			// Where the height pass's pixels are, from SCANmap in double: each column's and row's raw coordinate
+			// (r cos, g sin, b degrees; a column's a: 1 where |cos| beats |sin|, for the face tie), and an
+			// orthographic window's centre, east and north. The GPU's own trig is tenths of a texel out.
+			sampler2D _HeightColumns;
+			sampler2D _HeightRows;
+			float4 _OrthoCentre;
+			float4 _OrthoEast;
+			float4 _OrthoNorth;
 
 			// Altimetry / Slope
 			float _TerrainMin;      // LUT domain min (metres)
@@ -192,6 +199,16 @@ Shader "Hidden/SCANsat/VisualComposite"
 				else if (lat < -90.0) { lat = -180.0 - lat; lon += 180.0; }
 				lon = fmod(lon + 3600.0 + 180.0, 360.0) - 180.0;
 				lat = fmod(lat + 1800.0 + 90.0, 180.0) - 90.0;
+			}
+
+			// normalizeRaw for the height pass, without its rounding: adding 3600 before the fmod leaves a float
+			// 1/4096 of a degree, a sizeable share of a deep tile's texel. A coordinate in range is left exactly as
+			// it is, as the CPU's double arithmetic leaves it.
+			void wrapRaw(inout float lon, inout float lat)
+			{
+				if (lat > 90.0) { lat = 180.0 - lat; lon += 180.0; }
+				else if (lat < -90.0) { lat = -180.0 - lat; lon += 180.0; }
+				lon -= 360.0 * floor((lon + 180.0) / 360.0);
 			}
 
 			// Pixel raw coords -> geographic lon/lat (degrees). Returns 0.0 for out-of-disc pixels, else 1.0.
@@ -331,15 +348,17 @@ Shader "Hidden/SCANsat/VisualComposite"
 			// indirection textures name the tile's slot, the window's first; a pixel neither holds reads level
 			// 0's whole-face tile. LOD 0: the level already matches the map's scale (no mips to pick).
 			// Float flags instead of bools, as in unproject.
-			float3 mirageUV(float lon, float lat)
+			// The same from a direction. xTie settles an exact |x| = |z| tie the way the CPU's double-precision
+			// direction does (1: x, 0: z), where float has rounded the difference away; -1: by Mirage's order.
+			float mirageLocateDir(float3 d, float xTie, out float2 slot, out float2 f)
 			{
-				float rlat = lat * DEG2RAD;
-				float rlon = lon * DEG2RAD;
-				float3 d = float3(cos(rlat) * cos(rlon), sin(rlat), cos(rlat) * sin(rlon));
+				slot = float2(0.0, 0.0);
+				f = float2(0.0, 0.0);
 				float3 ad = abs(d);
 
 				// Mirage's tie order: X, then Y, then Z
-				float xMajor = step(ad.y, ad.x) * step(ad.z, ad.x);
+				float xOverZ = (xTie >= 0.0 && ad.x == ad.z) ? xTie : step(ad.z, ad.x);
+				float xMajor = step(ad.y, ad.x) * xOverZ;
 				float yMajor = (1.0 - xMajor) * step(ad.z, ad.y);
 				float zMajor = 1.0 - xMajor - yMajor;
 				float axis = xMajor * (1.0 - step(0.0, d.x)) + yMajor * (3.0 - step(0.0, d.y)) + zMajor * (5.0 - step(0.0, d.z));
@@ -350,11 +369,10 @@ Shader "Hidden/SCANsat/VisualComposite"
 				float2 uv = saturate(float2(dot(d, bu.xyz), dot(d, _MirageV[ai].xyz)) / major * 0.5 + 0.5);
 				float face = bu.w;
 
-				float2 slot, f;
 				if (_MirageDetail > 0.5)
 				{
 					if (mirageSlot(_MirageDetailIndirection, _MirageDetailLevel, face, uv, slot, f) > 0.5)
-						return float3((slot * _MirageTile.w + _MirageTile.z + f * _MirageTile.y) * _MirageDetailAtlas.y, 1.0);
+						return 1.0;
 				}
 
 				if (mirageSlot(_MirageIndirection, _MirageTile.x, face, uv, slot, f) < 0.5)
@@ -363,7 +381,68 @@ Shader "Hidden/SCANsat/VisualComposite"
 					f = uv;
 				}
 
-				return float3((slot * _MirageTile.w + _MirageTile.z + f * _MirageTile.y) * _MirageAtlas.y, 0.0);
+				return 0.0;
+			}
+
+			float mirageLocate(float lon, float lat, out float2 slot, out float2 f)
+			{
+				float rlat = lat * DEG2RAD;
+				float rlon = lon * DEG2RAD;
+				return mirageLocateDir(float3(cos(rlat) * cos(rlon), sin(rlat), cos(rlat) * sin(rlon)), -1.0, slot, f);
+			}
+
+			float3 mirageUV(float lon, float lat)
+			{
+				float2 slot, f;
+				float window = mirageLocate(lon, lat, slot, f);
+				float texel = window > 0.5 ? _MirageDetailAtlas.y : _MirageAtlas.y;
+				return float3((slot * _MirageTile.w + _MirageTile.z + f * _MirageTile.y) * texel, window);
+			}
+
+			// The Mitchell-Netravali cubic with B = C = 1/3 (Mitchell and Netravali, 1988): the weights of four
+			// samples one apart, for a point a fraction t past the second. A tap at distance x < 1 weighs
+			// (7/6)x^3 - 2x^2 + 8/9, one at 1 <= x < 2 weighs -(7/18)x^3 + 2x^2 - (10/3)x + 16/9.
+			float4 mitchellWeights(float t)
+			{
+				float4 x = float4(1.0 + t, t, 1.0 - t, 2.0 - t);
+				float4 near = ((7.0 / 6.0) * x - 2.0) * x * x + 8.0 / 9.0;
+				float4 far = ((-(7.0 / 18.0) * x + 2.0) * x - 10.0 / 3.0) * x + 16.0 / 9.0;
+				return float4(far.x, near.y, near.z, far.w);
+			}
+
+			// A Mirage body's height at a lon/lat, as a fraction of its PQSMod's span, the way Mirage's CPU
+			// sample reads it (SCANmirage.TryGetElevation): 4x4 texels through the Mitchell-Netravali cubic, a
+			// slot's texel i centred on position border + (tile fraction) * tile px = i, every tap clamped to the
+			// slot (its border keeps them inside the tile's neighbourhood). The atlas is point-sampled.
+			float mirageHeight(float3 d, float xTie)
+			{
+				float2 slot, f;
+				float window = mirageLocateDir(d, xTie, slot, f);
+				float texel = window > 0.5 ? _MirageDetailAtlas.y : _MirageAtlas.y;
+				float2 p = _MirageTile.z + f * _MirageTile.y;
+				float2 p0 = floor(p);
+				float4 wx = mitchellWeights(p.x - p0.x);
+				float4 wy = mitchellWeights(p.y - p0.y);
+				float2 origin = slot * _MirageTile.w;
+				float last = _MirageTile.w - 1.0;
+				float h = 0.0;
+				[unroll]
+				for (int j = 0; j < 4; j++)
+				{
+					float y = clamp(p0.y + j - 1.0, 0.0, last);
+					float row = 0.0;
+					[unroll]
+					for (int k = 0; k < 4; k++)
+					{
+						float2 uv = (origin + float2(clamp(p0.x + k - 1.0, 0.0, last), y) + 0.5) * texel;
+						float s = window > 0.5 ? tex2Dlod(_MirageDetailTiles, float4(uv, 0.0, 0.0)).r : tex2Dlod(_MirageTiles, float4(uv, 0.0, 0.0)).r;
+						row += wx[k] * s;
+					}
+
+					h += wy[j] * row;
+				}
+
+				return h;
 			}
 
 			// One layer of a Mirage body at a mirageUV result: the window's atlas or the whole body's
@@ -451,6 +530,18 @@ Shader "Hidden/SCANsat/VisualComposite"
 				uv = geoUVOf(lon, lat);
 				return onMap;
 			}
+
+		ENDCG
+
+		// Pass 0: the map
+		Pass
+		{
+			CGPROGRAM
+			#pragma vertex vert_img
+			#pragma fragment frag
+			// tex2Dgrad / tex2Dlod below: shader model 3.0. Without this Unity assumes 2.5
+			// (D3D11 ps_4_0_level_9_3), which has neither.
+			#pragma target 3.0
 
 			fixed4 frag(v2f_img i) : SV_Target
 			{
@@ -731,6 +822,73 @@ Shader "Hidden/SCANsat/VisualComposite"
 				}
 
 				return col * _OutputAlpha;   // 1 for the windows; the terrain planet overlay fades to 90 percent (lerp toward clear)
+			}
+			ENDCG
+		}
+
+		// Pass 1: a Mirage body's heights for the map, one texel per map pixel, which SCANmap reads back into
+		// its height cache instead of sampling them on the CPU. r: the height in metres as
+		// SCANUtil.getElevation gives it (rounded to 0.1 m), a true 0 m as -0.001 since 0 means unsampled;
+		// g: 1 where Altimetry is scanned, 0 where not, -1 off the map. A pixel's coordinate is the CPU
+		// cache's: the raw grid itself for a geographic cache (the big map), unprojected for a pixel-space
+		// one, at the pixel's index rather than its centre.
+		Pass
+		{
+			CGPROGRAM
+			#pragma vertex vert_img
+			#pragma fragment fragHeights
+			#pragma target 3.0
+
+			float4 fragHeights(v2f_img i) : SV_Target
+			{
+				float4 column = tex2Dlod(_HeightColumns, float4(i.uv.x, 0.5, 0.0, 0.0));
+				float4 row = tex2Dlod(_HeightRows, float4(i.uv.y, 0.5, 0.0, 0.0));
+				float rawLon = column.b;
+				float rawLat = row.b;
+				float lon = rawLon;
+				float lat = rawLat;
+				float3 d;
+				float xTie = -1.0;
+				if (_PixelSpace > 0.5 && _Projection > 2.5)
+				{
+					// Orthographic: the plane point (in units of 1.5 radians) straight to its direction
+					wrapRaw(rawLon, rawLat);
+					float x = rawLon * DEG2RAD / 1.5;
+					float y = rawLat * DEG2RAD / 1.5;
+					float rho2 = x * x + y * y;
+					if (!(rho2 <= 1.0))
+						return float4(0.0, -1.0, 0.0, 0.0);
+					d = sqrt(1.0 - rho2) * _OrthoCentre.xyz + x * _OrthoEast.xyz + y * _OrthoNorth.xyz;
+					lat = asin(clamp(d.y, -1.0, 1.0)) * RAD2DEG;
+					lon = atan2(d.z, d.x) * RAD2DEG;
+				}
+				else if (_PixelSpace > 0.5 && _Projection > 0.5)
+				{
+					// The other window projections, not drawn by any window today: the general (coarser) way
+					if (unproject(column.b, row.b, lon, lat) < 0.5)
+						return float4(0.0, -1.0, 0.0, 0.0);
+					float rlat = lat * DEG2RAD;
+					float rlon = lon * DEG2RAD;
+					d = float3(cos(rlat) * cos(rlon), sin(rlat), cos(rlat) * sin(rlon));
+				}
+				else
+				{
+					// Rectangular, or the geographic grid: raw angles straight from the tables. Past a pole the raw
+					// direction is the right one as it stands; only the coverage cell needs them normalised.
+					d = float3(row.r * column.r, row.g, row.r * column.g);
+					xTie = column.a;
+					wrapRaw(lon, lat);
+				}
+
+				float ilon = fmod(floor(lon + 540.0), 360.0);
+				float ilat = fmod(floor(lat + 270.0), 180.0);
+				float cov = decodeCoverage(float2((ilon + 0.5) / 360.0, (ilat + 0.5) / 180.0));
+				float scanned = (covHas(cov, 0.0) || covHas(cov, 1.0)) ? 1.0 : 0.0;
+
+				float m = round((_MirageHeightOffset + _MirageHeightScale * mirageHeight(d, xTie)) * 10.0) * 0.1;
+				if (m == 0.0)
+					m = -0.001;
+				return float4(m, scanned, 0.0, 0.0);
 			}
 			ENDCG
 		}

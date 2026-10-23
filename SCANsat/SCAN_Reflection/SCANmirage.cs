@@ -249,6 +249,24 @@ namespace SCANsat.SCAN_Reflection
 			return Math.Min(level, mb.maxLevel);
 		}
 
+		/// <summary>
+		/// What a height tile's fraction h stands for: offset + deformity * h metres, as TryGetElevation reads
+		/// it. False on any other body, or while its archive cannot be read.
+		/// </summary>
+		internal static bool TryGetHeightScale(CelestialBody body, out double deformity, out double offset)
+		{
+			deformity = offset = 0;
+			MirageBody mb = find(body);
+			if (mb == null || !ensureLayer(body, mb))
+			{
+				return false;
+			}
+
+			deformity = mb.deformity;
+			offset = mb.offset;
+			return true;
+		}
+
 		/// <summary>The span the PQSMod can produce: offset to offset + deformity.</summary>
 		internal static bool TryGetDeclaredRange(CelestialBody body, out double min, out double max)
 		{
