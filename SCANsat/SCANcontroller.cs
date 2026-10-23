@@ -304,6 +304,21 @@ namespace SCANsat
 				return true;
 			}
 
+			// A body on Parallax's scaled shader: Parallax unloads an off-screen body's textures as soon as it
+			// looks, so what getScaledSpaceSource loads for us is gone by the next composite, and each one
+			// loaded them again - ~200 ms a frame through a map's whole reveal. The copy made on the first
+			// load stands in from then on.
+			if (parallaxCopies.TryGetValue(b, out ParallaxCopy copy) && copy.color != null)
+			{
+				parallaxCopyOrder.Remove(b);
+				parallaxCopyOrder.Add(b);
+				colorTex = copy.color;
+				normalTex = copy.normal;
+				normalYChannel = copy.normalYChannel;
+				return true;
+			}
+
+			bool parallax = usesParallaxScaled(b);
 			if (!getScaledSpaceSource(b, out colorTex, out normalTex, out _, out gasRamp))
 			{
 				// A cfg body whose colour map would not load: OnDemand was told to skip it back in
@@ -320,7 +335,92 @@ namespace SCANsat
 
 			Texture2D n2d = normalTex as Texture2D;
 			normalYChannel = n2d != null ? SCANtextures.NormalYChannelFor(n2d.format) : 0;
+
+			if (parallax && gasRamp == null)
+			{
+				keepParallaxCopy(b, ref colorTex, ref normalTex, normalYChannel);
+			}
+
 			return true;
+		}
+
+		// GPU copies of Parallax-loaded Visual textures (see getVisualSource): exact, in their own compressed
+		// format, about 22 MB a body for Sol's 4k textures. A few bodies, least recently drawn freed first, and
+		// all of them with the scene.
+		private sealed class ParallaxCopy
+		{
+			internal Texture2D color, normal;
+			internal int normalYChannel;
+		}
+
+		private const int MaxParallaxCopies = 3;
+		private readonly Dictionary<CelestialBody, ParallaxCopy> parallaxCopies = new Dictionary<CelestialBody, ParallaxCopy>();
+		private readonly List<CelestialBody> parallaxCopyOrder = new List<CelestialBody>();
+
+		private static bool usesParallaxScaled(CelestialBody b)
+		{
+			MeshRenderer scaledMesh = b.scaledBody != null ? b.scaledBody.GetComponent<MeshRenderer>() : null;
+			Material material = scaledMesh != null ? scaledMesh.sharedMaterial : null;
+			string shaderName = material != null && material.shader != null ? material.shader.name : "";
+			// The same test GetVisualMapTexturesForBody makes before it asks Parallax to load the body
+			return shaderName.Contains("ParallaxScaled") || shaderName.Contains("HapkeScaled");
+		}
+
+		// Copy what Parallax loaded and hand the copies back in its place. A texture this device cannot copy
+		// is handed back as it is, and loaded again next time, as before.
+		private void keepParallaxCopy(CelestialBody b, ref Texture colorTex, ref Texture normalTex, int normalYChannel)
+		{
+			Texture2D color = gpuCopy(colorTex as Texture2D);
+			if (color == null)
+			{
+				return;
+			}
+
+			Texture2D normal = gpuCopy(normalTex as Texture2D);
+			parallaxCopies[b] = new ParallaxCopy { color = color, normal = normal, normalYChannel = normalYChannel };
+			parallaxCopyOrder.Remove(b);
+			parallaxCopyOrder.Add(b);
+			while (parallaxCopyOrder.Count > MaxParallaxCopies)
+			{
+				releaseParallaxCopy(parallaxCopyOrder[0]);
+			}
+
+			colorTex = color;
+			normalTex = normal ?? normalTex;
+		}
+
+		// An exact copy on the GPU, every mip, nothing on the CPU; null when this device cannot copy it
+		private static Texture2D gpuCopy(Texture2D src)
+		{
+			if (src == null || (SystemInfo.copyTextureSupport & UnityEngine.Rendering.CopyTextureSupport.Basic) == 0)
+			{
+				return null;
+			}
+
+			Texture2D copy = new Texture2D(src.width, src.height, src.format, src.mipmapCount,
+				!UnityEngine.Experimental.Rendering.GraphicsFormatUtility.IsSRGBFormat(src.graphicsFormat))
+			{
+				name = "SCANsat copy of " + src.name,
+				filterMode = src.filterMode,
+				wrapModeU = src.wrapModeU,
+				wrapModeV = src.wrapModeV,
+				anisoLevel = src.anisoLevel,
+			};
+			copy.Apply(false, true);
+			Graphics.CopyTexture(src, copy);
+			return copy;
+		}
+
+		private void releaseParallaxCopy(CelestialBody b)
+		{
+			if (parallaxCopies.TryGetValue(b, out ParallaxCopy copy))
+			{
+				if (copy.color != null) { Destroy(copy.color); }
+				if (copy.normal != null) { Destroy(copy.normal); }
+				parallaxCopies.Remove(b);
+			}
+
+			parallaxCopyOrder.Remove(b);
 		}
 
 		/// <summary>
@@ -1296,6 +1396,11 @@ namespace SCANsat
 				t.Release();
 			}
 			mapTextureHandler.Clear();
+			while (parallaxCopyOrder.Count > 0)
+			{
+				releaseParallaxCopy(parallaxCopyOrder[0]);
+			}
+
 			SCANmirageAtlas.ReleaseAll();
 			SCANmirage.ReleaseAll();
 		}
