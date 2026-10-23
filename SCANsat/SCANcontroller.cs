@@ -1256,9 +1256,11 @@ namespace SCANsat
 
 			while (true)
 			{
-				d.generateHeightMap(360);
+				// 20 of a row's 360 samples a step (it must divide 360): a whole row is the least a frame
+				// does, and on an RSS-scale PQS body a row of samples is ~100 ms
+				d.generateHeightMap(20);
 
-				// Every call either finishes the map or advances a row, so this always terminates.
+				// Every call either finishes the map or advances the row, so this always terminates.
 				if (d.Built || System.Diagnostics.Stopwatch.GetTimestamp() - start >= budget)
 				{
 					break;

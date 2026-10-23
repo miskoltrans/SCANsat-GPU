@@ -861,6 +861,7 @@ namespace SCANsat.SCAN_Map
 			private int passBuildFrames;
 			private float passBuildStart = -1f;
 			private float passBuildMs;
+			private double passSlowestBuildMs, passSlowestCompositeMs;   // the longest frame's two halves
 			private Color[] gpuRowBuf;
 			private CacheKey resourceGridKey;   // the field resourceCache was sampled from
 			private CacheKey resourceTexKey;    // the grid resourceTex was uploaded from
@@ -891,6 +892,11 @@ namespace SCANsat.SCAN_Map
 		private float outputAlpha = 1f;      // final multiplier on the composite (terrain planet overlay: 0.9)
 		private float resGreyBlend = 0.3f;   // resourceToColor32's Transparency argument for below-range cells
 		private int rangeRow = -1;           // autoRange pre-pass cursor: -1 not started, >= mapheight done
+		private int rangeCol;                // ... and its column within rangeRow
+		private int rowCol;                  // prepRow's column within row mapstep
+		// Pixels a building map always gets each frame, however far over the budget: progress without a long
+		// frame. A whole row was the floor, and a row of PQS samples on an RSS-scale body is ~200 ms.
+		private const int MinColumnsPerFrame = 16;
 		private float rangeMin, rangeMax;
 		private int rangeSamples;
 
@@ -991,12 +997,14 @@ namespace SCANsat.SCAN_Map
 			gpuRecolorSweep = false;   // a recolour in flight ends here; the decision below is made afresh. Left set, a mode switch mid-sweep re-Blit the new mode from textures never built for it.
 			sweepStart = -1f;
 			rangeRow = -1;
+			rowCol = 0;
 			noiseSeed = UnityEngine.Random.value;
 			passHeightSamples = 0;
 			passBiomeSamples = 0;
 			passBuildFrames = 0;
 			passBuildStart = -1f;
 			passBuildMs = 0f;
+			passSlowestBuildMs = passSlowestCompositeMs = 0;
 			resourceConfigKey = 0;       // new pass: take the resource key again (the field may have changed under us)
 			coverageFlagsDirty = true;   // new pass: refresh the GPU coverage stencil once from live coverage
 			resourceActive = resourceOn;
@@ -2148,11 +2156,13 @@ namespace SCANsat.SCAN_Map
 		// One row of the auto-range pre-pass: every 4th pixel of row rangeRow, sampled at its unprojected
 		// coordinate into the cache (the build skips those pixels later), min/max accumulated. Same
 		// stride and coordinates as the windows' old calcTerrainLimits, coverage ignored as there.
-		private void preSampleRangeRow()
+		// Returns false when the budget ran out part-way: the row goes on from rangeCol next frame.
+		private bool preSampleRangeRow(long start, long budget)
 		{
 			if (rangeRow < 0)
 			{
 				rangeRow = 0;
+				rangeCol = 0;
 				rangeMin = float.MaxValue;
 				rangeMax = float.MinValue;
 				rangeSamples = 0;
@@ -2162,8 +2172,14 @@ namespace SCANsat.SCAN_Map
 
 			if (row < mapheight && row >= startLine && row <= stopLine && big_heightmap != null)
 			{
-				for (int i = 0; i < mapwidth; i += 4)
+				for (int done = 0; rangeCol < mapwidth; rangeCol += 4, done++)
 				{
+					if (done >= MinColumnsPerFrame && System.Diagnostics.Stopwatch.GetTimestamp() - start >= budget)
+					{
+						return false;
+					}
+
+					int i = rangeCol;
 					double lat = (row * 1.0f / mapscale) - 90f + lat_offset;
 					double lon = (i * 1.0f / mapscale) - 180f + lon_offset;
 					double la = lat, lo = lon;
@@ -2195,6 +2211,8 @@ namespace SCANsat.SCAN_Map
 			}
 
 			rangeRow += 4;
+			rangeCol = 0;
+			return true;
 		}
 
 		// calcTerrainLimits' guards, then the range the palette LUT and the legend use.
@@ -2374,13 +2392,14 @@ namespace SCANsat.SCAN_Map
 		// The CPU sampling for one map row: elevation into big_heightmap where the cache has none, and in
 		// Biome mode the biome index into biomeIndex. buildSlice stages the results into the data
 		// textures; the shader does all the colourising, and reads its own neighbouring texels for the
-		// slope and the biome borders, so no row needs another row sampled first.
-		private void prepRow(int row)
+		// slope and the biome borders, so no row needs another row sampled first. Returns false when the
+		// budget ran out part-way: the row goes on from rowCol next frame.
+		private bool prepRow(int row, long start, long budget)
 		{
 			// RPM reserved rows: the shader draws them clear, so nothing is sampled for them.
 			if (row < startLine || row > stopLine)
 			{
-				return;
+				return true;
 			}
 
 			// Biome rows are cached in biome_indexmap (per body and size, and per window for a pixel-space
@@ -2393,13 +2412,19 @@ namespace SCANsat.SCAN_Map
 
 			if (!wantBiome && !wantElev)
 			{
-				return;
+				return true;
 			}
 
 			double rawLat = (row * 1.0f / mapscale) - 90f + lat_offset;
 
-			for (int i = 0; i < mapwidth; i++)
+			for (int done = 0; rowCol < mapwidth; rowCol++, done++)
 			{
+				if (done >= MinColumnsPerFrame && System.Diagnostics.Stopwatch.GetTimestamp() - start >= budget)
+				{
+					return false;
+				}
+
+				int i = rowCol;
 				// Column i's longitude on the map's raw grid. (A planet overlay's pixels run the planet's
 				// way, but its caches are geographic: the shader maps each pixel back to the true longitude
 				// and reads them there, so nothing here needs the planet's layout.)
@@ -2466,6 +2491,9 @@ namespace SCANsat.SCAN_Map
 				passBiomeSamples++;
 				biomeIndex[i] = SCANUtil.getBiomeIndexFraction(body, lon, lat);
 			}
+
+			rowCol = 0;
+			return true;
 		}
 
 		// One frame's slice of a data pass (Altimetry / Slope / Biome): rows sampled under the per-frame
@@ -2498,7 +2526,10 @@ namespace SCANsat.SCAN_Map
 			{
 				while (rangeRow < mapheight)
 				{
-					preSampleRangeRow();
+					if (!preSampleRangeRow(start, budget))
+					{
+						break;   // part-way through a row: the rest next frame
+					}
 
 					if (rangeRow >= mapheight)
 					{
@@ -2519,11 +2550,15 @@ namespace SCANsat.SCAN_Map
 				}
 			}
 
-			// At least one row per frame, however long it takes, then as many as fit the budget. Row
-			// mapstep is sampled and staged in the same step; the shader reads neighbouring rows itself.
+			// At least MinColumnsPerFrame pixels per frame, then as many as fit the budget; a row the budget
+			// cuts short goes on next frame. Row mapstep is staged once it is all sampled; the shader reads
+			// neighbouring rows itself.
 			while (mapstep < mapheight)
 			{
-				prepRow(mapstep);
+				if (!prepRow(mapstep, start, budget))
+				{
+					break;
+				}
 
 				// Biome: biomeIndex is this row's fresh lookup, or biome_indexmap already holds it.
 				if (mType == mapType.Biome && biome_indexmap != null)
@@ -2606,7 +2641,10 @@ namespace SCANsat.SCAN_Map
 
 			ensureRenderTex();
 
-			if (mapstep < mapheight && !buildSlice())
+			long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+			bool built = mapstep >= mapheight || buildSlice();
+			passSlowestBuildMs = Math.Max(passSlowestBuildMs, (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+			if (!built)
 			{
 				return;   // the auto-range pre-pass is still running: nothing to show yet, the target keeps the previous pass
 			}
@@ -2616,7 +2654,9 @@ namespace SCANsat.SCAN_Map
 				return;   // no reveal (the planet overlay): nothing is shown mid-build, one composite when it is done
 			}
 
+			t0 = System.Diagnostics.Stopwatch.GetTimestamp();
 			composite();
+			passSlowestCompositeMs = Math.Max(passSlowestCompositeMs, (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
 
 			if (!passComplete)
 			{
@@ -2630,8 +2670,9 @@ namespace SCANsat.SCAN_Map
 			}
 			else if (passBuildStart >= 0f)
 			{
-				SCANUtil.SCANlog("[{0}] {1} GPU pass {2}x{3}: build {4} frames / {5:F0} ms ({6} height samples, {7} biome lookups), pass total {8:F2} s",
-					body.bodyName, mType, mapwidth, mapheight, passBuildFrames, passBuildMs, passHeightSamples, passBiomeSamples, Time.realtimeSinceStartup - passBuildStart);
+				SCANUtil.SCANlog("[{0}] {1} GPU pass {2}x{3}: build {4} frames / {5:F0} ms ({6} height samples, {7} biome lookups), pass total {8:F2} s, longest build {9:F1} ms, longest composite {10:F1} ms",
+					body.bodyName, mType, mapwidth, mapheight, passBuildFrames, passBuildMs, passHeightSamples, passBiomeSamples, Time.realtimeSinceStartup - passBuildStart,
+					passSlowestBuildMs, passSlowestCompositeMs);
 				passBuildStart = -1f;   // one line per pass
 			}
 		}
