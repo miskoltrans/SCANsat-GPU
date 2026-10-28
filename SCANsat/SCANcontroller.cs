@@ -1249,7 +1249,7 @@ namespace SCANsat
 
 		/// <summary>
 		/// One frame's worth of a body's height map build, under the per-frame CPU budget the GPU map
-		/// builds share (SCANmap.claimBuildBudget): at least one row, then as many more as fit. The old
+		/// builds share (SCANmap.claimBuildBudget): at least one step, then as many more as fit. The old
 		/// one-row-per-call cadence made this frame-rate bound rather than CPU bound - the 64,800 PQS
 		/// samples are only about 80 ms of work, but they took 4.5 s on the Moon (RSS) and around ten
 		/// in a heavier scene, ~98% of it spent waiting for the next frame. Whoever owns the build (here,
@@ -1264,8 +1264,8 @@ namespace SCANsat
 
 			while (true)
 			{
-				// 20 of a row's 360 samples a step (it must divide 360): a whole row is the least a frame
-				// does, and on an RSS-scale PQS body a row of samples is ~100 ms
+				// 20 of a row's 360 samples a step (it must divide 360), the least a frame does: small
+				// enough that a slow PQS body cannot make a long frame of it
 				d.generateHeightMap(20);
 
 				// Every call either finishes the map or advances the row, so this always terminates.

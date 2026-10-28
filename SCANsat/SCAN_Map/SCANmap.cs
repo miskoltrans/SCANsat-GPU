@@ -1424,8 +1424,9 @@ namespace SCANsat.SCAN_Map
 			return mirageWindow;
 		}
 
-		// A window map's pixel (column, row from the bottom) to the lon/lat it shows, as its data caches are
-		// filled; false off the map (outside a projection's disc).
+		// A window map's pixel (column, row from the bottom) to the lon/lat it shows: where its data caches are
+		// sampled (prepRow, preSampleRangeRow) and its Mirage window's tiles are fetched, so the one formula
+		// serves all three. False off the map (outside a projection's disc).
 		internal bool pixelLonLat(int i, int row, out double lon, out double lat)
 		{
 			double rawLon = (i * 1.0f / mapscale) - 180f + lon_offset;
@@ -2227,13 +2228,7 @@ namespace SCANsat.SCAN_Map
 					}
 
 					int i = rangeCol;
-					double lat = (row * 1.0f / mapscale) - 90f + lat_offset;
-					double lon = (i * 1.0f / mapscale) - 180f + lon_offset;
-					double la = lat, lo = lon;
-					lat = unprojectLatitude(lo, la);
-					lon = unprojectLongitude(lo, la);
-
-					if (double.IsNaN(lat) || double.IsNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180)
+					if (!pixelLonLat(i, row, out double lon, out double lat))
 					{
 						continue;
 					}
@@ -2488,9 +2483,7 @@ namespace SCANsat.SCAN_Map
 
 					if (!profile.GeographicCache)
 					{
-						sampleLat = unprojectLatitude(rawLon, rawLat);
-						sampleLon = unprojectLongitude(rawLon, rawLat);
-						onMap = !(double.IsNaN(sampleLat) || double.IsNaN(sampleLon) || sampleLat < -90 || sampleLat > 90 || sampleLon < -180 || sampleLon > 180);
+						onMap = pixelLonLat(i, row, out sampleLon, out sampleLat);
 					}
 
 					if (onMap)
@@ -2521,16 +2514,10 @@ namespace SCANsat.SCAN_Map
 				// unprojected coordinate, where the shader reads it by pixel uv.
 				double lat = rawLat, lon = rawLon;
 
-				if (!profile.GeographicCache)
+				if (!profile.GeographicCache && !pixelLonLat(i, row, out lon, out lat))
 				{
-					lat = unprojectLatitude(rawLon, rawLat);
-					lon = unprojectLongitude(rawLon, rawLat);
-
-					if (double.IsNaN(lat) || double.IsNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180)
-					{
-						biomeIndex[i] = 0;
-						continue;
-					}
+					biomeIndex[i] = 0;
+					continue;
 				}
 
 				// One biome lookup per pixel: the shader colourises from _BiomeLUT[biomeIndex] (stock
