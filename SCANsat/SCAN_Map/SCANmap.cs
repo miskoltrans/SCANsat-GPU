@@ -54,6 +54,10 @@ namespace SCANsat.SCAN_Map
 				{
 					clearWindowCaches();   // pixel-space caches: a new zoom level is a new window
 				}
+				if (mapscale != value)
+				{
+					heldRangeValid = false;
+				}
 				mapscale = value;
 				resourceMapScale = mapscale * mapwidth / resourceMapWidth;
 			}
@@ -92,7 +96,30 @@ namespace SCANsat.SCAN_Map
 		public mapType MType
 		{
 			get { return mType; }
-			set { mType = value; }
+			set
+			{
+				if (mType != value)
+				{
+					heldRangeValid = false;
+				}
+				mType = value;
+			}
+		}
+
+		/// <summary>true: a window map's fitted palette range only widens from pass to pass, so a height keeps its
+		/// colour while the window moves (the zoom map following its vessel); a new scale, mode or body fits afresh.
+		/// false: each pass fits its own window.</summary>
+		internal bool HoldAutoRange
+		{
+			get { return holdAutoRange; }
+			set
+			{
+				if (holdAutoRange != value)
+				{
+					heldRangeValid = false;
+				}
+				holdAutoRange = value;
+			}
 		}
 
 		public bool ColorMap
@@ -538,6 +565,8 @@ namespace SCANsat.SCAN_Map
 		private double[] biomeIndex;
 		private int startLine;
 		private int stopLine;
+		bool holdAutoRange, heldRangeValid;   // HoldAutoRange, and whether heldMin/heldMax hold a range yet
+		float heldMin, heldMax;
 		double sunLonCenter;
 		double sunLatCenter;
 		double gamma;
@@ -954,6 +983,10 @@ namespace SCANsat.SCAN_Map
 
 			bool bodyChanged = body != b;
 			int outgoingBody = body != null ? body.flightGlobalsIndex : -1;   // `body` is reassigned below
+			if (bodyChanged)
+			{
+				heldRangeValid = false;
+			}
 
 			if (bodyChanged)
 			{
@@ -2390,6 +2423,20 @@ namespace SCANsat.SCAN_Map
 			if (min >= max)
 			{
 				min = max - 1f;
+			}
+
+			// Held: the range so far, widened to this window's
+			if (holdAutoRange)
+			{
+				if (heldRangeValid)
+				{
+					min = Math.Min(min, heldMin);
+					max = Math.Max(max, heldMax);
+				}
+
+				heldMin = min;
+				heldMax = max;
+				heldRangeValid = true;
 			}
 
 			useCustomRange = true;

@@ -43,9 +43,6 @@ namespace SCANsat.SCAN_Unity
 		private bool updateMap;
 		private bool rebuilding;
 		private float passStart, lastPassEnd, lastPassSeconds;   // the window's passes, for following the vessel
-
-		// Locked to the vessel, the map follows it this often (real seconds), or once a pass if a pass takes longer
-		private const float FollowInterval = 1f;
 		private bool narrowBand;
 		private StringBuilder infoString = new StringBuilder();
 		private System.Random gen;
@@ -648,6 +645,7 @@ namespace SCANsat.SCAN_Unity
 				uiElement.SetLegends(LegendToggle);   // the palette range and the biome list come from the finished pass
 			}
 
+			spotmap.HoldAutoRange = VesselLock && HighLogic.LoadedSceneIsFlight;
 			if (VesselLock && !rebuilding && HighLogic.LoadedSceneIsFlight)
 			{
 				followVessel();
@@ -670,14 +668,16 @@ namespace SCANsat.SCAN_Unity
 			}
 		}
 
-		// Locked to the vessel, the map re-centres on it once it has moved a map pixel: every FollowInterval,
-		// or after as long again as the last pass took, so a body whose maps build slowly (PQS terrain, not
-		// Mirage) is building at most half the time. The auto-refresh timer still re-centres too.
+		// Locked to the vessel, the map re-centres on it once it has moved a map pixel, as soon as it has been idle
+		// as long as its last pass took: building at most half the time. A Mirage body's Visual map follows every few
+		// frames, its Altimetry and Biome a few times a second; a body whose terrain is slow to sample (PQS, not
+		// Mirage) every couple of seconds. The palette range only widens meanwhile (SCANmap.HoldAutoRange), so a
+		// height keeps its colour. The auto-refresh timer still re-centres too.
 		private void followVessel()
 		{
 			Vessel v = FlightGlobals.ActiveVessel;
 
-			if (v == null || Time.realtimeSinceStartup - lastPassEnd < Mathf.Max(FollowInterval, lastPassSeconds))
+			if (v == null || Time.realtimeSinceStartup - lastPassEnd < lastPassSeconds)
 			{
 				return;
 			}
