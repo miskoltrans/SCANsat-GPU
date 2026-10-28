@@ -29,6 +29,7 @@ namespace SCANsat.SCAN_Map
 		private bool legendScheme;
 		private bool stockScheme;
 		private CelestialBody body;
+		private string[] legendBiomes;   // the biomes the biome legend was drawn for, in its order
 
 		public Texture2D Legend
 		{
@@ -99,7 +100,14 @@ namespace SCANsat.SCAN_Map
 
 		public Texture2D getLegend(SCANdata data, bool color, bool stock, CBAttributeMapSO.MapAttribute[] biomes, bool reset = false)
 		{
-			if (legend != null && legendScheme == color && stockScheme == stock && body == data.Body && !reset)
+			// The list is part of the key: the maps list only the biomes they show, which grows with coverage
+			bool sameBiomes = legendBiomes != null && legendBiomes.Length == biomes.Length;
+			for (int k = 0; sameBiomes && k < biomes.Length; k++)
+			{
+				sameBiomes = legendBiomes[k] == biomes[k].name;
+			}
+
+			if (legend != null && legendScheme == color && stockScheme == stock && body == data.Body && sameBiomes && !reset)
 			{
 				return legend;
 			}
@@ -111,9 +119,14 @@ namespace SCANsat.SCAN_Map
 			body = data.Body;
 			legendScheme = color;
 			stockScheme = stock;
+			legendBiomes = new string[biomes.Length];
+			for (int k = 0; k < biomes.Length; k++)
+			{
+				legendBiomes[k] = biomes[k].name;
+			}
 
-			// The gradient and greyscale colour a biome by its index in the body, as the map does: the zoom
-			// legend lists only some of the body's biomes
+			// The gradient and greyscale colour a biome by its index in the body, as the map does: the
+			// legends list only the biomes the map shows
 			CBAttributeMapSO.MapAttribute[] atts = body.BiomeMap != null ? body.BiomeMap.Attributes : null;
 			int bodyCount = atts != null && atts.Length > 0 ? atts.Length : biomes.Length;
 

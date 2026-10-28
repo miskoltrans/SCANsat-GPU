@@ -2324,10 +2324,10 @@ namespace SCANsat.SCAN_Map
 			customResourceMax = max;
 		}
 
-		// The biomes this window map shows, in the body's order: those of its biome-scanned pixels, read from
-		// the biome index cache once rows are built (the zoom map's legend lists them). The cache holds every
-		// pixel's biome, scanned or not - the shader masks the unscanned - so coverage is tested here. Null
-		// until any row is cached.
+		// The biomes this map shows, in the body's order: those of its biome-scanned pixels, read from the
+		// biome index cache once rows are built (the zoom and big maps' legends list them). The cache holds
+		// every pixel's biome, scanned or not - the shader masks the unscanned - so coverage is tested here.
+		// Null until any row is cached.
 		internal List<CBAttributeMapSO.MapAttribute> BiomesInView()
 		{
 			if (body == null || body.BiomeMap == null || biome_indexmap == null || biomeRowCached == null || data == null)
@@ -2340,7 +2340,8 @@ namespace SCANsat.SCAN_Map
 			bool[] seen = new bool[atts.Length];
 			bool anyRow = false;
 
-			for (int y = 0; y < mapheight && y < biomeRowCached.Length; y++)
+			int width = biome_indexmap.GetLength(0), height = biome_indexmap.GetLength(1);
+			for (int y = 0; y < height && y < biomeRowCached.Length; y++)
 			{
 				if (!biomeRowCached[y])
 				{
@@ -2348,8 +2349,9 @@ namespace SCANsat.SCAN_Map
 				}
 
 				anyRow = true;
+				double rawLat = (y * 1.0f / mapscale) - 90f + lat_offset;   // a geographic cache's grid, as prepRow samples it
 
-				for (int x = 0; x < mapwidth; x++)
+				for (int x = 0; x < width; x++)
 				{
 					int idx = Mathf.RoundToInt(biome_indexmap[x, y] * atts.Length);
 
@@ -2358,7 +2360,17 @@ namespace SCANsat.SCAN_Map
 						continue;
 					}
 
-					if (pixelLonLat(x, y, out double lon, out double lat) && SCANUtil.isCovered(lon, lat, data, SCANtype.Biome))
+					double lon, lat = rawLat;
+					if (profile.GeographicCache)
+					{
+						lon = (x * 1.0f / mapscale) - 180f + lon_offset;
+					}
+					else if (!pixelLonLat(x, y, out lon, out lat))
+					{
+						continue;
+					}
+
+					if (SCANUtil.isCovered(lon, lat, data, SCANtype.Biome))
 					{
 						seen[idx] = true;
 					}
