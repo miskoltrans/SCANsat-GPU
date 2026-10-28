@@ -14,6 +14,9 @@
 * The zoom map no longer plays the scanline reveal: it shows a map as soon as it is built, with the line marking a build still in progress. The big map, small map and RPM keep the Scanline Speed setting
 * The zoom map's biome legend lists only the biomes in scanned terrain (it listed every biome under the window), and its gradient and greyscale colours match the map's
 * The big map's biome legend lists only the biomes in scanned terrain too, so an unscanned body no longer gives its biomes away
+* Building maps no longer upload their whole data textures every frame: the big map's Altimetry and Biome frames came to 10-17 ms on the 4 ms budget
+* Right-clicking the main map opens the zoom map on that spot, as on the big map
+* A zoom map locked to the vessel follows it every second in flight, instead of only when the auto-refresh fires
 
 ## 22.1 - 2026/10/12
 
