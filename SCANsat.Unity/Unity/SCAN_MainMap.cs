@@ -171,6 +171,8 @@ namespace SCANsat.Unity.Unity
 
 			CreateVessels(map.VesselInfoList);
 
+			addZoomHereButton();
+
 			SetScale(map.Scale);
 
 			SetPosition(map.Position);
@@ -389,8 +391,10 @@ namespace SCANsat.Unity.Unity
 		{
 			transform.SetAsLastSibling();
 
-			// A right click on the map opens the zoom map there, as on the big map; a left drag moves the window
-			if (eventData.button != PointerEventData.InputButton.Right || m_MainMap == null || mapInterface == null)
+			// A right click on the map opens the zoom map there, as on the big map, and so does a left click after the
+			// zoom-here button; otherwise a left drag moves the window
+			bool picked = pickingZoom && eventData.button == PointerEventData.InputButton.Left;
+			if ((eventData.button != PointerEventData.InputButton.Right && !picked) || m_MainMap == null || mapInterface == null)
 			{
 				return;
 			}
@@ -409,7 +413,60 @@ namespace SCANsat.Unity.Unity
 				return;
 			}
 
+			setPickingZoom(false);
 			mapInterface.ClickMap(p);
+		}
+
+		private Image zoomHereIcon;
+		private bool pickingZoom;   // the zoom-here button is on: the next left click on the map opens the zoom map there
+		private static readonly Color pickingColor = new Color(1f, 0.8f, 0.2f, 1f);
+
+		// A small button in the map's top-right corner for opening the zoom map on a spot of the map: click it, then
+		// the spot. Its tooltip says a right click on the map does the same. Made here rather than in the prefab, so
+		// the prefab bundle stays as it is; its picture is the toolbar's zoom map icon.
+		private void addZoomHereButton()
+		{
+			if (zoomHereIcon != null || m_MainMap == null || mapInterface == null)
+			{
+				return;
+			}
+
+			Sprite icon = mapInterface.ZoomMapIcon;
+			if (icon == null)
+			{
+				Debug.LogWarning("[SCANsat] No zoom map icon for the main map's zoom-here button; it is left out");
+				return;
+			}
+
+			GameObject go = new GameObject("SCAN_ZoomHere", typeof(RectTransform));
+			go.transform.SetParent(m_MainMap.transform, false);
+			RectTransform r = (RectTransform)go.transform;
+			r.anchorMin = r.anchorMax = r.pivot = new Vector2(1f, 1f);
+			r.anchoredPosition = new Vector2(-2f, -2f);
+			r.sizeDelta = new Vector2(18f, 18f);
+
+			zoomHereIcon = go.AddComponent<Image>();
+			zoomHereIcon.sprite = icon;
+			zoomHereIcon.preserveAspect = true;
+
+			Button b = go.AddComponent<Button>();
+			b.targetGraphic = zoomHereIcon;
+			b.onClick.AddListener(() => setPickingZoom(!pickingZoom));
+
+			TooltipHandler tip = go.AddComponent<TooltipHandler>();
+			tip.Prefab = mapInterface.TooltipPrefab;
+			tip.TooltipText = mapInterface.ZoomHereTooltip;
+			ProcessTooltip(tip, mapInterface.TooltipsOn, mapInterface.TooltipCanvas, mapInterface.Scale);
+			Debug.Log("[SCANsat] Main map zoom-here button, icon " + icon.name);
+		}
+
+		private void setPickingZoom(bool on)
+		{
+			pickingZoom = on;
+			if (zoomHereIcon != null)
+			{
+				zoomHereIcon.color = on ? pickingColor : Color.white;
+			}
 		}
 
 		public void OnBeginDrag(PointerEventData eventData)

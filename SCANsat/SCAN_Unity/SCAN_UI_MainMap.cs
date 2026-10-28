@@ -683,6 +683,26 @@ namespace SCANsat.SCAN_Unity
 			SCAN_UI_ZoomMap.Instance.Open(false, -90 + 180 * position.y, -180 + 360 * position.x, visualMap);
 		}
 
+		public Sprite ZoomMapIcon
+		{
+			get
+			{
+				GameObject toolbar = SCAN_UI_Loader.ToolbarPrefab;
+				SCANsat.Unity.Unity.SCAN_Toolbar t = toolbar != null ? toolbar.GetComponent<SCANsat.Unity.Unity.SCAN_Toolbar>() : null;
+				return t != null ? t.ZoomMapIcon : null;
+			}
+		}
+
+		public string ZoomHereTooltip
+		{
+			get { return KSP.Localization.Localizer.Format("#autoLOC_SCANsat_mainMapZoomHere"); }
+		}
+
+		public GameObject TooltipPrefab
+		{
+			get { return SCAN_UI_Loader.TooltipPrefab; }
+		}
+
 		public void OpenOverlay()
 		{
 			if (SCAN_UI_Overlay.Instance.IsVisible)

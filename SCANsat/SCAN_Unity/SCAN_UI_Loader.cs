@@ -174,6 +174,12 @@ namespace SCANsat.SCAN_Unity
 			get { return _toolbarPrefab; }
 		}
 
+		// For a tooltip made in code rather than in a prefab
+		public static GameObject TooltipPrefab
+		{
+			get { return _tooltipPrefab; }
+		}
+
 		public static UISkinDef UnitySkinDef
 		{
 			get { return _unitySkinDef; }

@@ -166,6 +166,38 @@ namespace SCANsat.Unity.Unity
 			loaded = true;
 		}
 
+		// The zoom map's icon, for another window's button that opens the zoom map (the main map's zoom-here
+		// button). A toolbar toggle holds four pictures: its frame (Window), background, check mark and, last and on
+		// top, the icon (Image, SCAN_Zoom_Map_Icon_Large)
+		public Sprite ZoomMapIcon
+		{
+			get
+			{
+				if (m_ZoomMapToggle == null)
+				{
+					return null;
+				}
+
+				Sprite icon = null;
+				foreach (Image i in m_ZoomMapToggle.GetComponentsInChildren<Image>(true))
+				{
+					if (i == m_ZoomMapToggle.targetGraphic || i == m_ZoomMapToggle.graphic || i.sprite == null)
+					{
+						continue;
+					}
+
+					if (i.name == "Image")
+					{
+						return i.sprite;
+					}
+
+					icon = i.sprite;
+				}
+
+				return icon;
+			}
+		}
+
 		public void SetZoomMapToggle(bool isOn)
 		{
 			if (m_ZoomMapToggle == null)
