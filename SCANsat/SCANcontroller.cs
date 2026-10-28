@@ -376,7 +376,15 @@ namespace SCANsat
 				return;
 			}
 
+			// A normal map that will not copy leaves both as they are: a copy without it would draw the map shaded
+			// this once and unshaded from then on
 			Texture2D normal = gpuCopy(normalTex as Texture2D);
+			if (normalTex != null && normal == null)
+			{
+				Destroy(color);
+				return;
+			}
+
 			parallaxCopies[b] = new ParallaxCopy { color = color, normal = normal, normalYChannel = normalYChannel };
 			parallaxCopyOrder.Remove(b);
 			parallaxCopyOrder.Add(b);
@@ -386,7 +394,7 @@ namespace SCANsat
 			}
 
 			colorTex = color;
-			normalTex = normal ?? normalTex;
+			normalTex = normal;
 		}
 
 		// An exact copy on the GPU, every mip, nothing on the CPU; null when this device cannot copy it
