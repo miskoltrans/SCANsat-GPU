@@ -2574,8 +2574,8 @@ namespace SCANsat.SCAN_Map
 		{
 			if (gpuHeights == GpuHeights.Binding)
 			{
-				if (!SCANmirageAtlas.BindHeights(heightMaterial, body, Mathf.RoundToInt((float)(360 * mapscale)), mirageWindowFor(), out bool loading, out int level)
-					|| level != SCANmirage.LevelForScale(body, mapscale))
+				// At the level the CPU would sample, or not at all: nothing is read for a level the GPU cannot match
+				if (!SCANmirageAtlas.BindHeights(heightMaterial, body, mirageSampleLevel(), mirageWindowFor(), out bool loading))
 				{
 					gpuHeights = GpuHeights.Off;
 					return true;

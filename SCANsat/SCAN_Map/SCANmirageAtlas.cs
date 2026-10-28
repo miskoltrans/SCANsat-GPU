@@ -185,7 +185,8 @@ namespace SCANsat.SCAN_Map
 					return false;
 				}
 
-				bindLayers(m, body, layers, targetWidth, window, wait, out loading, out SCANmirageAtlas whole, out SCANmirageAtlas detail);
+				plan(layers, neededLevel(targetWidth, layers), window, false, out int wholeLevel, out int detailLevel, out HashSet<int> detailTiles);
+				bindLayers(m, body, layers, wholeLevel, detailLevel, detailTiles, window, wait, out loading, out SCANmirageAtlas whole, out SCANmirageAtlas detail);
 				shaded = whole.planes.Length > 1;
 				m.SetTexture("_MirageNormals", shaded ? whole.planes[1].texture : null);
 				if (detail != null)
@@ -205,17 +206,17 @@ namespace SCANsat.SCAN_Map
 		}
 
 		/// <summary>
-		/// The same for the body's height tiles, into a material for the composite shader's height pass, with
-		/// _MirageHeightScale and _MirageHeightOffset, the PQSMod's span (SCANmirage.TryGetHeightScale). level:
-		/// the level the pixels read, for the caller to hold against the CPU's (SCANmirage.LevelForScale).
-		/// False when the body has no height tiles the GPU can read: the caller samples on the CPU.
+		/// The same for the body's height tiles at level, the one the CPU samples (SCANmirage.LevelForScale),
+		/// into a material for the composite shader's height pass, with _MirageHeightScale and
+		/// _MirageHeightOffset, the PQSMod's span (SCANmirage.TryGetHeightScale). False, with nothing read,
+		/// when the GPU cannot read that level for this map - no height tiles it can sample, a level deeper
+		/// than the tiles it has, or more of them than an atlas holds: the caller samples on the CPU.
 		/// </summary>
-		internal static bool BindHeights(Material m, CelestialBody body, int targetWidth, Window window, out bool loading, out int level)
+		internal static bool BindHeights(Material m, CelestialBody body, int level, Window window, out bool loading)
 		{
 			loading = false;
-			level = -1;
 			string key = body == null ? null : body.name + "/height";
-			if (!SCANmirage.TilesLoaded || body == null || failedBodies.Contains(key) || !measureBasis()
+			if (level < 0 || !SCANmirage.TilesLoaded || body == null || failedBodies.Contains(key) || !measureBasis()
 				|| !SCANmirage.TryGetHeightScale(body, out double deformity, out double offset))
 			{
 				return false;
@@ -229,13 +230,13 @@ namespace SCANsat.SCAN_Map
 					bodyHeights[body] = layers;
 				}
 
-				if (layers == null)
+				if (layers == null || level > layers.primary.maxLevel || 6 << level > SystemInfo.maxTextureSize
+					|| !plan(layers, level, window, true, out int wholeLevel, out int detailLevel, out HashSet<int> detailTiles))
 				{
 					return false;
 				}
 
-				bindLayers(m, body, layers, targetWidth, window, false, out loading, out SCANmirageAtlas whole, out SCANmirageAtlas detail);
-				level = detail != null ? detail.level : whole.level;
+				bindLayers(m, body, layers, wholeLevel, detailLevel, detailTiles, window, false, out loading, out _, out _);
 				m.SetFloat("_MirageHeightScale", (float)deformity);
 				m.SetFloat("_MirageHeightOffset", (float)offset);
 				return true;
@@ -249,32 +250,44 @@ namespace SCANsat.SCAN_Map
 			}
 		}
 
-		// The atlases a map at targetWidth needs - the whole body's, and a window's own over them when its level
-		// is too deep for the whole body - pumped, and their first plane bound with the slot geometry
-		static void bindLayers(Material m, CelestialBody body, Layers layers, int targetWidth, Window window, bool wait,
-			out bool loading, out SCANmirageAtlas whole, out SCANmirageAtlas detail)
+		// The levels a map needing level needed reads, before anything is made: the whole body's, and over it a
+		// window's own (detailLevel, -1 for none). A window map at a level whose whole body would not fit a
+		// window's slots anyway gets its own tiles, at the deepest level whose share of them does; shallower,
+		// the whole body is cheaper, and shared. exact: needed itself or nothing (the height pass, which must
+		// read the level the CPU samples) - false when the plan falls short of it.
+		static bool plan(Layers layers, int needed, Window window, bool exact, out int wholeLevel, out int detailLevel, out HashSet<int> detailTiles)
 		{
-			int needed = neededLevel(targetWidth, layers);
-			int wholeLevel = Math.Min(needed, wholeBodyLevel(layers));
-
-			// A window map at a level whose whole body would not fit a window's slots anyway: its own tiles,
-			// at the deepest level whose share of them does. Shallower, the whole body is cheaper, and shared.
-			detail = null;
-			HashSet<int> detailTiles = null;
+			wholeLevel = Math.Min(needed, wholeBodyLevel(layers));
+			detailLevel = -1;
+			detailTiles = null;
 			if (window != null && needed > WindowBaseLevel && slotsFor(needed) > WindowSlots)
 			{
-				for (int l = needed; l > WindowBaseLevel; l--)
+				for (int l = needed; l > WindowBaseLevel && (!exact || l == needed); l--)
 				{
 					HashSet<int> tiles = window.TilesAt(l);
 					if (tiles.Count <= WindowSlots)
 					{
-						detail = find(body, layers, l, window.owner);
+						detailLevel = l;
 						detailTiles = tiles;
-						detail.require(tiles);
 						wholeLevel = WindowBaseLevel;
 						break;
 					}
 				}
+			}
+
+			return !exact || (detailLevel >= 0 ? detailLevel : wholeLevel) == needed;
+		}
+
+		// The planned atlases - the whole body's, and a window's own over them - pumped, and their first plane
+		// bound with the slot geometry
+		static void bindLayers(Material m, CelestialBody body, Layers layers, int wholeLevel, int detailLevel, HashSet<int> detailTiles, Window window, bool wait,
+			out bool loading, out SCANmirageAtlas whole, out SCANmirageAtlas detail)
+		{
+			detail = null;
+			if (detailLevel >= 0)
+			{
+				detail = find(body, layers, detailLevel, window.owner);
+				detail.require(detailTiles);
 			}
 
 			whole = find(body, layers, wholeLevel, null);
