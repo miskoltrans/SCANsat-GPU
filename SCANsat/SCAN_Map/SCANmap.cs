@@ -889,10 +889,15 @@ namespace SCANsat.SCAN_Map
 			private double passSlowestBuildMs, passSlowestCompositeMs;   // the longest frame's two halves
 
 			// A Mirage body's heights for a data pass, drawn from Mirage's height tiles by the composite shader's
-			// height pass and read back into big_heightmap in one go, instead of sampled pixel by pixel on the CPU
-			// (pumpGpuHeights). Off: the CPU samples them, as for every other body.
-			private enum GpuHeights { Off, Binding, Reading, Done }
+			// height pass and read back into big_heightmap, instead of sampled pixel by pixel on the CPU
+			// (pumpGpuHeights). Off: the CPU samples them, as for every other body. Filling: the read-back texels
+			// go into the caches a few rows a frame, under the build budget - a big map's million in one frame
+			// took 25-35 ms.
+			private enum GpuHeights { Off, Binding, Reading, Filling, Done }
 			private GpuHeights gpuHeights;
+			private float[] heightTexels;   // the readback's texels, kept while Filling (the request's own array is the frame's only)
+			private int heightFillRow;      // Filling: the next row to fill
+			private bool heightFillRange;   // Filling: the auto-range pre-pass is fitted from the texels too
 			private Material heightMaterial;
 			private RenderTexture heightTex;
 			private Texture2D heightColumns, heightRows;   // setHeightCoordinates
@@ -2575,7 +2580,7 @@ namespace SCANsat.SCAN_Map
 
 		// One frame of the GPU height pass. True once the heights are in big_heightmap, or once it has handed
 		// them back to the CPU (Off): no height tiles the GPU can read, or not at the level the CPU would sample.
-		private bool pumpGpuHeights()
+		private bool pumpGpuHeights(long start, long budget)
 		{
 			if (gpuHeights == GpuHeights.Binding)
 			{
@@ -2624,10 +2629,9 @@ namespace SCANsat.SCAN_Map
 					RenderTexture.active = heightTex;
 					read.ReadPixels(new Rect(0, 0, mapwidth, mapheight), 0, 0, false);
 					RenderTexture.active = prev;
-					fillHeights(read.GetRawTextureData<float>());
+					beginHeightFill(read.GetRawTextureData<float>());
 					UnityEngine.Object.Destroy(read);
-					gpuHeights = GpuHeights.Done;
-					return true;
+					return fillHeightRows(start, budget);
 				}
 
 				heightRead = UnityEngine.Rendering.AsyncGPUReadback.Request(heightTex);
@@ -2648,8 +2652,12 @@ namespace SCANsat.SCAN_Map
 					return true;
 				}
 
-				fillHeights(heightRead.GetData<float>());
-				gpuHeights = GpuHeights.Done;
+				beginHeightFill(heightRead.GetData<float>());
+			}
+
+			if (gpuHeights == GpuHeights.Filling)
+			{
+				return fillHeightRows(start, budget);
 			}
 
 			return true;
@@ -2810,18 +2818,47 @@ namespace SCANsat.SCAN_Map
 		// where Altimetry is scanned (prepRow), and at the auto-range pre-pass's every 4th pixel of every 4th row,
 		// scanned or not (preSampleRangeRow) - whose range is fitted here too, from those pixels, as there. Off
 		// the map stays 0. The biomes into biome_indexmap, every pixel of every row, as prepRow does them.
-		private void fillHeights(global::Unity.Collections.NativeArray<float> texels)
+		// Copied out of the readback first, then filled a few rows a frame (fillHeightRows).
+		private void beginHeightFill(global::Unity.Collections.NativeArray<float> texels)
 		{
-			bool range = profile.AutoRange && (mType == mapType.Altimetry || mType == mapType.Biome) && rangeRow < mapheight;
-			if (range)
+			if (heightTexels == null || heightTexels.Length != texels.Length)
+			{
+				heightTexels = new float[texels.Length];
+			}
+
+			texels.CopyTo(heightTexels);
+			heightFillRow = Math.Max(0, startLine);
+			heightFillRange = profile.AutoRange && (mType == mapType.Altimetry || mType == mapType.Biome) && rangeRow < mapheight;
+			if (heightFillRange)
 			{
 				rangeMin = float.MaxValue;
 				rangeMax = float.MinValue;
 				rangeSamples = 0;
 			}
 
-			for (int row = Math.Max(0, startLine); row <= stopLine && row < mapheight; row++)
+			gpuHeights = GpuHeights.Filling;
+		}
+
+		// Rows of the read-back texels into the caches, at least one, then while the budget lasts. True once
+		// every row is in (Done).
+		private bool fillHeightRows(long start, long budget)
+		{
+			if (heightTexels == null || heightTexels.Length < 4 * mapwidth * mapheight)
 			{
+				gpuHeights = GpuHeights.Off;   // the map changed size under the readback: the CPU samples instead
+				return true;
+			}
+
+			float[] texels = heightTexels;
+			int lastRow = Math.Min(stopLine, mapheight - 1);
+			for (int filled = 0; heightFillRow <= lastRow; heightFillRow++, filled++)
+			{
+				if (filled > 0 && System.Diagnostics.Stopwatch.GetTimestamp() - start >= budget)
+				{
+					return false;
+				}
+
+				int row = heightFillRow;
 				for (int i = 0; i < mapwidth; i++)
 				{
 					int k = 4 * (row * mapwidth + i);
@@ -2832,7 +2869,7 @@ namespace SCANsat.SCAN_Map
 						passBiomeSamples++;
 					}
 
-					bool rangeCell = range && scanned > -0.5f && (row & 3) == 0 && (i & 3) == 0;
+					bool rangeCell = heightFillRange && scanned > -0.5f && (row & 3) == 0 && (i & 3) == 0;
 					if (scanned > 0.5f || rangeCell)
 					{
 						big_heightmap[i, row] = h;
@@ -2847,21 +2884,21 @@ namespace SCANsat.SCAN_Map
 						rangeSamples++;
 					}
 				}
-			}
 
-			if (gpuBiomes)
-			{
-				for (int row = Math.Max(0, startLine); row <= stopLine && row < mapheight; row++)
+				if (gpuBiomes)
 				{
 					biomeRowCached[row] = true;
 				}
 			}
 
-			if (range)
+			if (heightFillRange)
 			{
 				rangeRow = mapheight;
 				applyAutoTerrainRange();
 			}
+
+			gpuHeights = GpuHeights.Done;
+			return true;
 		}
 
 		// One frame's slice of a data pass (Altimetry / Slope / Biome): rows sampled under the per-frame
@@ -2886,8 +2923,8 @@ namespace SCANsat.SCAN_Map
 			}
 			passBuildFrames++;
 
-			// A Mirage body's heights come off the GPU in one go; nothing to show until they are in
-			if (gpuHeights != GpuHeights.Off && gpuHeights != GpuHeights.Done && !pumpGpuHeights())
+			// A Mirage body's heights come off the GPU and into the caches over a few frames; nothing to show until they are in
+			if (gpuHeights != GpuHeights.Off && gpuHeights != GpuHeights.Done && !pumpGpuHeights(start, budget))
 			{
 				reportBuildBudgetUsed(System.Diagnostics.Stopwatch.GetTimestamp() - start);
 				return false;
