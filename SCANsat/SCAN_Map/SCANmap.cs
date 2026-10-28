@@ -266,13 +266,34 @@ namespace SCANsat.SCAN_Map
 			passHeightSamples++;
 			float alt = 0f;
 			// A Mirage body is sampled at the archive level that matches this map's pixel size.
-			alt = (float)SCANUtil.getElevation(body, lon, lat, SCANmirage.LevelForScale(body, mapscale));
+			alt = (float)SCANUtil.getElevation(body, lon, lat, mirageSampleLevel());
 			if (alt == 0f)
 			{
 				alt = -0.001f;
 			}
 
 			big_heightmap[ilon, ilat] = alt;
+		}
+
+		// SCANmirage.LevelForScale for this map's body and scale, worked out once rather than per pixel. A
+		// Mirage body whose height layer is not up yet answers -1: asked again next time, not kept.
+		private int sampleLevel = -1;
+		private double sampleLevelScale = double.NaN;
+		private CelestialBody sampleLevelBody;
+
+		private int mirageSampleLevel()
+		{
+			if (sampleLevelScale != mapscale || !ReferenceEquals(sampleLevelBody, body))
+			{
+				sampleLevel = SCANmirage.LevelForScale(body, mapscale);
+				if (sampleLevel >= 0 || !SCANmirage.IsMirageBody(body))
+				{
+					sampleLevelScale = mapscale;
+					sampleLevelBody = body;
+				}
+			}
+
+			return sampleLevel;
 		}
 
 		/* MAP: Projection methods for converting planet coordinates to the rectangular texture */
