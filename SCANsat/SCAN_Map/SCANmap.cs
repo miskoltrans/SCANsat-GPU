@@ -666,6 +666,8 @@ namespace SCANsat.SCAN_Map
 			if (exporter != null) { UnityEngine.Object.Destroy(exporter.gameObject); exporter = null; }
 			if (elevationTex != null) { UnityEngine.Object.Destroy(elevationTex); elevationTex = null; }
 			if (biomeIndexTex != null) { UnityEngine.Object.Destroy(biomeIndexTex); biomeIndexTex = null; }
+			elevationUpload.Release();
+			biomeUpload.Release();
 			if (resourceTex != null) { UnityEngine.Object.Destroy(resourceTex); resourceTex = null; }
 			if (paletteLUT != null) { UnityEngine.Object.Destroy(paletteLUT); paletteLUT = null; }
 			if (paletteGreyLUT != null) { UnityEngine.Object.Destroy(paletteGreyLUT); paletteGreyLUT = null; }
@@ -691,7 +693,6 @@ namespace SCANsat.SCAN_Map
 			biome_indexmap = null;
 			biomeRowCached = null;
 			resourceCache = null;
-			gpuRowBuf = null;
 		}
 
 		// The data caches, sized for the mode that is about to run and no other. Altimetry and Slope
@@ -905,7 +906,7 @@ namespace SCANsat.SCAN_Map
 			private UnityEngine.Rendering.AsyncGPUReadbackRequest heightRead;
 			// The harness turns it off to hold the GPU's heights against the CPU's
 			internal static bool GpuHeightsAllowed = true;
-			private Color[] gpuRowBuf;
+			private readonly RowUploader elevationUpload = new RowUploader(), biomeUpload = new RowUploader();
 			private CacheKey resourceGridKey;   // the field resourceCache was sampled from
 			private CacheKey resourceTexKey;    // the grid resourceTex was uploaded from
 			private CacheKey paletteLUTKey;
@@ -1894,8 +1895,8 @@ namespace SCANsat.SCAN_Map
 			return sum;
 		}
 
-		// Ensure the mode's R-float data texture exists (cleared to 0). Rows are then staged by
-		// stageDataRow as the prep fills the cache and uploaded once per frame (buildSlice).
+		// Ensure the mode's R-float data texture exists (cleared to 0). Rows are then staged by a
+		// RowUploader as the prep fills the cache and uploaded once per frame (buildSlice).
 		// A new Texture2D's contents are undefined, so the fresh texture is zeroed through its own raw
 		// CPU buffer - GetRawTextureData<float> is a view over storage Unity has already allocated, not
 		// a copy. The full-size Color[] mirror this replaced cost 16 bytes a pixel, 16 MB standing per
@@ -1920,20 +1921,106 @@ namespace SCANsat.SCAN_Map
 			tex.Apply(false);
 		}
 
-		// Stage one geographic row (src column y=row) into the data texture's CPU mirror. No Apply
-		// here: Apply re-uploads the whole texture, so the caller does it once per frame.
-		private void stageDataRow(Texture2D tex, float[,] src, int row)
+		/// <summary>
+		/// One data texture's rows on their way to the GPU. Texture2D.Apply re-uploads the whole texture - 4 MB
+		/// for a 1440x720 RFloat map - and a build applied its data textures every frame: the big map's Biome
+		/// frames (two textures) ran to 16-17 ms on a 4 ms budget, Altimetry's (one) to 10 ms. A frame's rows go
+		/// into a strip of StripRows rows instead, which is applied - a few hundred KB - and copied into place on
+		/// the GPU. Without CopyTexture the rows go straight into the texture and it is applied whole, as before.
+		/// The texture's CPU-side copy goes stale; nothing applies it whole again but ensureDataTex's clear,
+		/// which comes before any row is staged.
+		/// </summary>
+		private sealed class RowUploader
 		{
-			if (tex == null || src == null || row < 0 || row >= mapheight) { return; }
-			if (gpuRowBuf == null || gpuRowBuf.Length != mapwidth)
+			private const int StripRows = 32;
+			private static readonly bool canCopy = (SystemInfo.copyTextureSupport & UnityEngine.Rendering.CopyTextureSupport.Basic) != 0;
+			private Texture2D strip;
+			private Texture2D target;
+			private int first, count;
+			private Color[] rowBuf;   // without CopyTexture: SetPixels straight into the texture
+
+			// Row y=row of src (columns x) into the texture, uploaded at the next Flush
+			internal void Stage(Texture2D tex, float[,] src, int row, int width)
 			{
-				gpuRowBuf = new Color[mapwidth];
+				if (!canCopy)
+				{
+					if (rowBuf == null || rowBuf.Length != width)
+					{
+						rowBuf = new Color[width];
+					}
+
+					for (int x = 0; x < width; x++)
+					{
+						rowBuf[x] = new Color(src[x, row], 0f, 0f, 0f);
+					}
+
+					tex.SetPixels(0, row, width, 1, rowBuf);
+					target = tex;
+					count = 1;
+					return;
+				}
+
+				if (count > 0 && (target != tex || count == StripRows || row != first + count || strip.width != width))
+				{
+					Flush();
+				}
+
+				if (strip == null || strip.width != width)
+				{
+					Release();
+					strip = new Texture2D(width, StripRows, TextureFormat.RFloat, false);
+				}
+
+				if (count == 0)
+				{
+					target = tex;
+					first = row;
+				}
+
+				// RFloat: one float per texel, rows of width from the bottom, as SetPixels addresses them
+				global::Unity.Collections.NativeArray<float> texels = strip.GetRawTextureData<float>();
+				int o = count * width;
+				for (int x = 0; x < width; x++)
+				{
+					texels[o + x] = src[x, row];
+				}
+
+				count++;
 			}
-			for (int x = 0; x < mapwidth; x++)
+
+			// The staged rows onto the GPU: once per build frame, and whenever the strip fills
+			internal void Flush()
 			{
-				gpuRowBuf[x] = new Color(src[x, row], 0f, 0f, 0f);
+				if (count == 0 || target == null)
+				{
+					count = 0;
+					return;
+				}
+
+				if (canCopy)
+				{
+					strip.Apply(false);
+					Graphics.CopyTexture(strip, 0, 0, 0, 0, strip.width, count, target, 0, 0, 0, first);
+				}
+				else
+				{
+					target.Apply(false);
+				}
+
+				count = 0;
 			}
-			tex.SetPixels(0, row, mapwidth, 1, gpuRowBuf);
+
+			internal void Release()
+			{
+				if (strip != null)
+				{
+					UnityEngine.Object.Destroy(strip);
+					strip = null;
+				}
+
+				count = 0;
+				target = null;
+			}
 		}
 
 		// Build resourceCache (stock abundance). Nothing else builds it - a pass's first composite calls
@@ -2922,7 +3009,6 @@ namespace SCANsat.SCAN_Map
 		{
 			long start = System.Diagnostics.Stopwatch.GetTimestamp();
 			long budget = Math.Max(claimBuildBudget(), (long)(MinSliceMs * System.Diagnostics.Stopwatch.Frequency / 1000.0));
-			bool elevDirty = false, biomeDirty = false;
 
 			if (biomeRowCached == null || biomeRowCached.Length != mapheight)
 			{
@@ -2996,8 +3082,7 @@ namespace SCANsat.SCAN_Map
 						biomeRowCached[mapstep] = true;
 					}
 					ensureDataTex(ref biomeIndexTex, true);
-					stageDataRow(biomeIndexTex, biome_indexmap, mapstep);
-					biomeDirty = true;
+					biomeUpload.Stage(biomeIndexTex, biome_indexmap, mapstep, mapwidth);
 				}
 				// Only a mode that samples elevation gets an elevation texture. A Biome map with no
 				// underlay (the small map, the biome planet overlay) staged a full row of zeros per row
@@ -3006,8 +3091,7 @@ namespace SCANsat.SCAN_Map
 				if (big_heightmap != null)
 				{
 					ensureDataTex(ref elevationTex);
-					stageDataRow(elevationTex, big_heightmap, mapstep);
-					elevDirty = true;
+					elevationUpload.Stage(elevationTex, big_heightmap, mapstep, mapwidth);
 				}
 
 				mapstep++;
@@ -3021,8 +3105,8 @@ namespace SCANsat.SCAN_Map
 				}
 			}
 
-			if (elevDirty) { elevationTex.Apply(false); }
-			if (biomeDirty) { biomeIndexTex.Apply(false); }
+			elevationUpload.Flush();
+			biomeUpload.Flush();
 
 			reportBuildBudgetUsed(System.Diagnostics.Stopwatch.GetTimestamp() - start);
 
