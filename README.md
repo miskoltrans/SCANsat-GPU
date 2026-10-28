@@ -189,6 +189,7 @@ Bodies rendered by **Mirage** (ballisticfox's terrain and virtual-texture mod, u
 
 * **Altimetry** and **Slope** sample Mirage's height tiles at the level that matches the map's pixel size.
 * **Visual** draws Mirage's colour tiles, shaded by its normal tiles, on the GPU. The zoom map and RPM screens fetch the tiles under their window at their own level, down to the deepest level installed; the PNG export waits for the level its width needs.
+* **Night lights**: with the day/night terminator on, a Visual map of a Mirage body whose own material draws Mirage's emissive layer (Sol's Earth and Io) shows it, in the tint and at the times of day the body's material uses: Earth's city lights at night, fading in over civil twilight, Io's lava always.
 * Without Mirage, every body is mapped as before. If a Mirage update changes what SCANsat calls, SCANsat logs an error and falls back: Visual to the body's other sources (a SCANSAT\_BODY\_TEXTURES config, then its ScaledSpace textures), Altimetry and Slope to KSP's terrain (PQS), which on Mirage bodies may read flat.
 
 #### [:top:][top] 1d. Other Add-Ons 

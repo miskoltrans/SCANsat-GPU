@@ -47,6 +47,8 @@ namespace SCANsat.SCAN_Map
 		// What a body's readers report, taken once; null for a body Mirage does not texture. Maps only draw
 		// in flight and the tracking station, after Mirage has read its configs at the main menu.
 		static readonly Dictionary<CelestialBody, Layers> bodyLayers = new Dictionary<CelestialBody, Layers>();
+		// The same for height tiles (BindHeights); null: none the GPU can read
+		static readonly Dictionary<CelestialBody, Layers> bodyHeights = new Dictionary<CelestialBody, Layers>();
 		static Vector4[] basisU, basisV;
 		static bool basisMeasured, basisFailed;
 
@@ -91,10 +93,17 @@ namespace SCANsat.SCAN_Map
 			internal int maxLevel, format, tileSize, border;
 		}
 
-		// normal is null when the body has no normals the shader can read (BC5), and Visual is unshaded
+		// The layers an atlas holds, a plane each, the first deciding the slots: Visual's colour, then its
+		// normals unless the body has none the shader can read (BC5) and Visual is unshaded, then its night
+		// lights where the body's own material draws them; or heights
 		class Layers
 		{
-			internal Layer color, normal;
+			internal Layer[] planes;
+			internal bool heights;
+			internal int normalPlane = -1, lightPlane = -1;   // their planes; -1 for none
+			internal Color lightColor;   // the body material's _EmissiveColor
+			internal float lightMode;    // and _EmissiveLightMode: -1 at night, 0 always, 1 by day
+			internal Layer primary { get { return planes[0]; } }
 		}
 
 		// One layer's reader and its GPU copy
@@ -118,10 +127,12 @@ namespace SCANsat.SCAN_Map
 		readonly CelestialBody body;
 		readonly int level;
 		readonly bool window;   // tiles on request into a pool of slots; otherwise the whole body, read once
+		readonly bool heights;   // height tiles, for the shader's height pass; otherwise Visual's
 		readonly object owner;   // a window's map
 		int boundFrame;
 		readonly int tileSize, border, slotSize, columns, atlasSize;
-		readonly Plane[] planes;   // colour, then normals if the body has them
+		readonly Plane[] planes;   // colour, then normals and night lights if the body has them (Layers)
+		readonly int normalPlane;   // -1: none
 		readonly Stopwatch clock = Stopwatch.StartNew();
 
 		readonly SlotState[] slotState;
@@ -137,6 +148,7 @@ namespace SCANsat.SCAN_Map
 		Color32[] indirectionPixels;
 		bool indirectionDirty;
 		byte[] flatNormal;   // a level BC5 slot, for a normal tile that will not read
+		byte[] darkSlot;     // an unlit slot, for a night-light tile that will not read
 
 		// Worker <-> main thread
 		readonly object gate = new object();
@@ -157,9 +169,10 @@ namespace SCANsat.SCAN_Map
 		/// tiles asked for are still to land, so the caller should composite again. wait: block until they
 		/// have (a one-off render).
 		/// </summary>
-		internal static bool Bind(Material m, CelestialBody body, int targetWidth, Window window, bool wait, out bool shaded, out bool loading)
+		internal static bool Bind(Material m, CelestialBody body, int targetWidth, Window window, bool wait, out bool shaded, out bool lights, out bool loading)
 		{
 			shaded = false;
+			lights = false;
 			loading = false;
 			if (!SCANmirage.TilesLoaded || body == null || failedBodies.Contains(body.name) || !measureBasis())
 			{
@@ -179,61 +192,27 @@ namespace SCANsat.SCAN_Map
 					return false;
 				}
 
-				int needed = neededLevel(targetWidth, layers);
-				int wholeLevel = Math.Min(needed, wholeBodyLevel(layers));
-
-				// A window map at a level whose whole body would not fit a window's slots anyway: its own tiles,
-				// at the deepest level whose share of them does. Shallower, the whole body is cheaper, and shared.
-				SCANmirageAtlas detail = null;
-				HashSet<int> detailTiles = null;
-				if (window != null && needed > WindowBaseLevel && slotsFor(needed) > WindowSlots)
-				{
-					for (int l = needed; l > WindowBaseLevel; l--)
-					{
-						HashSet<int> tiles = window.TilesAt(l);
-						if (tiles.Count <= WindowSlots)
-						{
-							detail = find(body, layers, l, window.owner);
-							detailTiles = tiles;
-							detail.require(tiles);
-							wholeLevel = WindowBaseLevel;
-							break;
-						}
-					}
-				}
-
-				SCANmirageAtlas whole = find(body, layers, wholeLevel, null);
-				whole.pump(wait);
+				plan(layers, neededLevel(targetWidth, layers), window, false, out int wholeLevel, out int detailLevel, out HashSet<int> detailTiles);
+				bindLayers(m, body, layers, wholeLevel, detailLevel, detailTiles, window, wait, out loading, out SCANmirageAtlas whole, out SCANmirageAtlas detail);
+				shaded = layers.normalPlane >= 0;
+				m.SetTexture("_MirageNormals", shaded ? whole.planes[layers.normalPlane].texture : null);
 				if (detail != null)
 				{
-					detail.pump(wait);
-					// Waited for: every slot has landed, so the tiles that found none can have one now
-					if (wait && detail.unplaced > 0)
-					{
-						detail.require(detailTiles);
-						detail.pump(true);
-					}
+					m.SetTexture("_MirageDetailNormals", shaded ? detail.planes[layers.normalPlane].texture : null);
 				}
 
-				loading = !whole.Complete || (detail != null && !detail.Complete);
-				shaded = whole.planes.Length > 1;
-
-				m.SetTexture("_MirageTiles", whole.planes[0].texture);
-				m.SetTexture("_MirageNormals", shaded ? whole.planes[1].texture : null);
-				m.SetTexture("_MirageIndirection", whole.indirection);
-				m.SetVectorArray("_MirageU", basisU);
-				m.SetVectorArray("_MirageV", basisV);
-				m.SetVector("_MirageTile", new Vector4(1 << whole.level, whole.tileSize, whole.border, whole.slotSize));
-				m.SetVector("_MirageAtlas", new Vector4(whole.columns, 1f / whole.atlasSize, 0, 0));
-
-				m.SetFloat("_MirageDetail", detail != null ? 1f : 0f);
+				// Night lights: the composite shader's pass 2, which SCANmap runs with the terminator on
+				lights = layers.lightPlane >= 0;
+				m.SetTexture("_MirageEmissive", lights ? whole.planes[layers.lightPlane].texture : null);
 				if (detail != null)
 				{
-					m.SetTexture("_MirageDetailTiles", detail.planes[0].texture);
-					m.SetTexture("_MirageDetailNormals", shaded ? detail.planes[1].texture : null);
-					m.SetTexture("_MirageDetailIndirection", detail.indirection);
-					m.SetFloat("_MirageDetailLevel", 1 << detail.level);
-					m.SetVector("_MirageDetailAtlas", new Vector4(detail.columns, 1f / detail.atlasSize, 0, 0));
+					m.SetTexture("_MirageDetailEmissive", lights ? detail.planes[layers.lightPlane].texture : null);
+				}
+
+				if (lights)
+				{
+					m.SetColor("_EmissiveColor", layers.lightColor);
+					m.SetFloat("_EmissiveLightMode", layers.lightMode);
 				}
 
 				return true;
@@ -244,6 +223,123 @@ namespace SCANsat.SCAN_Map
 				Log.Exception(e);
 				Log.Error($"[{body.name}] Mirage tiles could not be read; Visual uses the body's other sources");
 				return false;
+			}
+		}
+
+		/// <summary>
+		/// The same for the body's height tiles at level, the one the CPU samples (SCANmirage.LevelForScale),
+		/// into a material for the composite shader's height pass, with _MirageHeightScale and
+		/// _MirageHeightOffset, the PQSMod's span (SCANmirage.TryGetHeightScale). False, with nothing read,
+		/// when the GPU cannot read that level for this map - no height tiles it can sample, a level deeper
+		/// than the tiles it has, or more of them than an atlas holds: the caller samples on the CPU.
+		/// </summary>
+		internal static bool BindHeights(Material m, CelestialBody body, int level, Window window, out bool loading)
+		{
+			loading = false;
+			string key = body == null ? null : body.name + "/height";
+			if (level < 0 || !SCANmirage.TilesLoaded || body == null || failedBodies.Contains(key) || !measureBasis()
+				|| !SCANmirage.TryGetHeightScale(body, out double deformity, out double offset))
+			{
+				return false;
+			}
+
+			try
+			{
+				if (!bodyHeights.TryGetValue(body, out Layers layers))
+				{
+					layers = probeHeights(body);
+					bodyHeights[body] = layers;
+				}
+
+				if (layers == null || level > layers.primary.maxLevel || 6 << level > SystemInfo.maxTextureSize
+					|| !plan(layers, level, window, true, out int wholeLevel, out int detailLevel, out HashSet<int> detailTiles))
+				{
+					return false;
+				}
+
+				bindLayers(m, body, layers, wholeLevel, detailLevel, detailTiles, window, false, out loading, out _, out _);
+				m.SetFloat("_MirageHeightScale", (float)deformity);
+				m.SetFloat("_MirageHeightOffset", (float)offset);
+				return true;
+			}
+			catch (Exception e)
+			{
+				failedBodies.Add(key);
+				Log.Exception(e);
+				Log.Error($"[{body.name}] Mirage height tiles could not be read; heights are sampled on the CPU");
+				return false;
+			}
+		}
+
+		// The levels a map needing level needed reads, before anything is made: the whole body's, and over it a
+		// window's own (detailLevel, -1 for none). A window map at a level whose whole body would not fit a
+		// window's slots anyway gets its own tiles, at the deepest level whose share of them does; shallower,
+		// the whole body is cheaper, and shared. exact: needed itself or nothing (the height pass, which must
+		// read the level the CPU samples) - false when the plan falls short of it.
+		static bool plan(Layers layers, int needed, Window window, bool exact, out int wholeLevel, out int detailLevel, out HashSet<int> detailTiles)
+		{
+			wholeLevel = Math.Min(needed, wholeBodyLevel(layers));
+			detailLevel = -1;
+			detailTiles = null;
+			if (window != null && needed > WindowBaseLevel && slotsFor(needed) > WindowSlots)
+			{
+				for (int l = needed; l > WindowBaseLevel && (!exact || l == needed); l--)
+				{
+					HashSet<int> tiles = window.TilesAt(l);
+					if (tiles.Count <= WindowSlots)
+					{
+						detailLevel = l;
+						detailTiles = tiles;
+						wholeLevel = WindowBaseLevel;
+						break;
+					}
+				}
+			}
+
+			return !exact || (detailLevel >= 0 ? detailLevel : wholeLevel) == needed;
+		}
+
+		// The planned atlases - the whole body's, and a window's own over them - pumped, and their first plane
+		// bound with the slot geometry
+		static void bindLayers(Material m, CelestialBody body, Layers layers, int wholeLevel, int detailLevel, HashSet<int> detailTiles, Window window, bool wait,
+			out bool loading, out SCANmirageAtlas whole, out SCANmirageAtlas detail)
+		{
+			detail = null;
+			if (detailLevel >= 0)
+			{
+				detail = find(body, layers, detailLevel, window.owner);
+				detail.require(detailTiles);
+			}
+
+			whole = find(body, layers, wholeLevel, null);
+			whole.pump(wait);
+			if (detail != null)
+			{
+				detail.pump(wait);
+				// Waited for: every slot has landed, so the tiles that found none can have one now
+				if (wait && detail.unplaced > 0)
+				{
+					detail.require(detailTiles);
+					detail.pump(true);
+				}
+			}
+
+			loading = !whole.Complete || (detail != null && !detail.Complete);
+
+			m.SetTexture("_MirageTiles", whole.planes[0].texture);
+			m.SetTexture("_MirageIndirection", whole.indirection);
+			m.SetVectorArray("_MirageU", basisU);
+			m.SetVectorArray("_MirageV", basisV);
+			m.SetVector("_MirageTile", new Vector4(1 << whole.level, whole.tileSize, whole.border, whole.slotSize));
+			m.SetVector("_MirageAtlas", new Vector4(whole.columns, 1f / whole.atlasSize, 0, 0));
+
+			m.SetFloat("_MirageDetail", detail != null ? 1f : 0f);
+			if (detail != null)
+			{
+				m.SetTexture("_MirageDetailTiles", detail.planes[0].texture);
+				m.SetTexture("_MirageDetailIndirection", detail.indirection);
+				m.SetFloat("_MirageDetailLevel", 1 << detail.level);
+				m.SetVector("_MirageDetailAtlas", new Vector4(detail.columns, 1f / detail.atlasSize, 0, 0));
 			}
 		}
 
@@ -261,6 +357,7 @@ namespace SCANsat.SCAN_Map
 			atlases.Clear();
 			failedBodies.Clear();
 			bodyLayers.Clear();
+			bodyHeights.Clear();
 		}
 
 		static bool measureBasis()
@@ -310,7 +407,7 @@ namespace SCANsat.SCAN_Map
 			for (int i = 0; i < atlases.Count; i++)
 			{
 				SCANmirageAtlas a = atlases[i];
-				if (a.body != body || a.window != window || !ReferenceEquals(a.owner, owner))
+				if (a.body != body || a.heights != layers.heights || a.window != window || !ReferenceEquals(a.owner, owner))
 				{
 					continue;
 				}
@@ -386,7 +483,91 @@ namespace SCANsat.SCAN_Map
 				normal = null;
 			}
 
-			return new Layers { color = color, normal = normal };
+			Layers layers = new Layers();
+			List<Layer> planes = new List<Layer> { color };
+			if (normal != null)
+			{
+				layers.normalPlane = planes.Count;
+				planes.Add(normal);
+			}
+
+			// Night lights where the body's own material draws Mirage's emissive layer (Sol's Earth and Io), in its
+			// tint and light mode. One channel, in the colour tiles' slots: so only at their layout and full depth,
+			// or the plane would hold every map at a shallower level than its colour has.
+			if (lightsDrawn(body, out layers.lightColor, out layers.lightMode))
+			{
+				Layer light = null;
+				try
+				{
+					light = probe(body, "Emissive", true);
+				}
+				catch (Exception e)
+				{
+					Log.Exception(e);
+				}
+
+				TextureFormat lf = light == null ? 0 : (TextureFormat)light.format;
+				if (light != null && ((lf != TextureFormat.BC4 && lf != TextureFormat.R8) || !SystemInfo.SupportsTextureFormat(lf)
+					|| light.tileSize != color.tileSize || light.border != color.border || light.maxLevel < color.maxLevel))
+				{
+					Log.Warning($"[{body.name}] Mirage emissive tiles are {lf}, {light.tileSize} px, to level {light.maxLevel} (colour {color.maxLevel}); no night lights");
+					light = null;
+				}
+
+				if (light != null)
+				{
+					layers.lightPlane = planes.Count;
+					planes.Add(light);
+					Log.Message($"[{body.name}] Mirage night lights: tint {layers.lightColor}, "
+						+ (layers.lightMode < -0.5f ? "at night" : layers.lightMode > 0.5f ? "by day" : "always"));
+				}
+			}
+
+			layers.planes = planes.ToArray();
+			return layers;
+		}
+
+		// Whether the body's own map-view material draws Mirage's emissive layer (Kopernicus's EMISSIVE_TEXTURES
+		// keyword, or Mirage's _HasEmissiveVT once it has bound the layer), and its tint and light mode there
+		static bool lightsDrawn(CelestialBody body, out Color color, out float mode)
+		{
+			color = Color.white;
+			mode = -1f;
+			Renderer r = body.scaledBody != null ? body.scaledBody.GetComponent<Renderer>() : null;
+			Material m = r != null ? r.sharedMaterial : null;
+			if (m == null || !m.HasProperty("_EmissiveColor")
+				|| !(m.IsKeywordEnabled("EMISSIVE_TEXTURES") || (m.HasProperty("_HasEmissiveVT") && m.GetFloat("_HasEmissiveVT") > 0.5f)))
+			{
+				return false;
+			}
+
+			color = m.GetColor("_EmissiveColor");
+			if (m.HasProperty("_EmissiveLightMode"))
+			{
+				mode = m.GetFloat("_EmissiveLightMode");
+			}
+
+			return true;
+		}
+
+		// Height tiles the shader can read: 16-bit fractions of the PQSMod's span, read texel by texel (the
+		// height pass filters them itself, as Mirage's CPU sample does)
+		static Layers probeHeights(CelestialBody body)
+		{
+			Layer height = probe(body, "Height", true);
+			if (height == null)
+			{
+				return null;
+			}
+
+			if ((TextureFormat)height.format != TextureFormat.R16 || !SystemInfo.SupportsTextureFormat(TextureFormat.R16)
+				|| (SystemInfo.copyTextureSupport & UnityEngine.Rendering.CopyTextureSupport.Basic) == 0)
+			{
+				Log.Warning($"[{body.name}] Mirage height tiles are {(TextureFormat)height.format}, which the GPU path does not read here; heights are sampled on the CPU");
+				return null;
+			}
+
+			return new Layers { planes = new[] { height }, heights = true };
 		}
 
 		// A layer's reader, and one of its level-0 tiles read to check that it is the size its layout says:
@@ -425,12 +606,11 @@ namespace SCANsat.SCAN_Map
 		// tiles - within the archive's depth
 		static int neededLevel(int targetWidth, Layers layers)
 		{
-			double tiles = targetWidth / 4.0 / layers.color.tileSize;
+			double tiles = targetWidth / 4.0 / layers.primary.tileSize;
 			int level = tiles <= 1 ? 0 : (int)Math.Ceiling(Math.Log(tiles, 2));
-			level = Math.Min(level, layers.color.maxLevel);
-			if (layers.normal != null)
+			foreach (Layer layer in layers.planes)
 			{
-				level = Math.Min(level, layers.normal.maxLevel);
+				level = Math.Min(level, layer.maxLevel);
 			}
 
 			// The indirection has a texel per tile of the level, six faces tall
@@ -445,7 +625,7 @@ namespace SCANsat.SCAN_Map
 		// The deepest level the whole body fits the budget at
 		static int wholeBodyLevel(Layers layers)
 		{
-			long slotBytes = slotBytesOf((TextureFormat)layers.color.format, layers.color.tileSize + 2 * layers.color.border);
+			long slotBytes = slotBytesOf((TextureFormat)layers.primary.format, layers.primary.tileSize + 2 * layers.primary.border);
 			int level = 0;
 			while (slotsFor(level + 1) * slotBytes <= MaxBytesPerLayer)
 			{
@@ -475,6 +655,8 @@ namespace SCANsat.SCAN_Map
 				case TextureFormat.R8:
 				case TextureFormat.Alpha8:
 					return (long)slotSize * slotSize;
+				case TextureFormat.R16:
+					return (long)slotSize * slotSize * 2;
 				default:
 					return (long)slotSize * slotSize * 4;
 			}
@@ -486,8 +668,10 @@ namespace SCANsat.SCAN_Map
 			this.level = level;
 			this.owner = owner;
 			window = owner != null;
-			tileSize = layers.color.tileSize;
-			border = layers.color.border;
+			heights = layers.heights;
+			normalPlane = layers.normalPlane;
+			tileSize = layers.primary.tileSize;
+			border = layers.primary.border;
 			slotSize = tileSize + 2 * border;
 
 			int slots = window ? WindowSlots : slotsFor(level);
@@ -500,13 +684,8 @@ namespace SCANsat.SCAN_Map
 			List<Plane> made = new List<Plane>(2);
 			try
 			{
-				foreach (Layer layer in new Layer[] { layers.color, layers.normal })
+				foreach (Layer layer in layers.planes)
 				{
-					if (layer == null)
-					{
-						continue;
-					}
-
 					Plane p = new Plane { layer = layer };
 					made.Add(p);
 					p.source = SCANmirage.CreateTileSource(body, layer.name, layer.linear, out _, out _, out _, out _);
@@ -520,7 +699,8 @@ namespace SCANsat.SCAN_Map
 					p.texture = new Texture2D(atlasSize, atlasSize, format, false, layer.linear)
 					{
 						name = "SCANsat Mirage " + layer.name + " " + body.name + (window ? " window L" : " L") + level,
-						filterMode = FilterMode.Bilinear,
+						// Heights are read texel by texel and filtered in the shader
+						filterMode = heights ? FilterMode.Point : FilterMode.Bilinear,
 						wrapMode = TextureWrapMode.Clamp,
 					};
 					p.texture.Apply(false, true);
@@ -572,8 +752,8 @@ namespace SCANsat.SCAN_Map
 				bytes += slots * slotBytesOf((TextureFormat)p.layer.format, slotSize);
 			}
 
-			Log.Message($"[{body.name}] Mirage Visual: {(window ? "window" : "whole body")} at level {level}, {slots} slots of {slotSize} px, "
-				+ $"{(planes.Length > 1 ? "colour and normals" : "colour only")} ({atlasSize} px atlases, {bytes / 1048576.0:F1} MB)");
+			Log.Message($"[{body.name}] Mirage {(heights ? "heights" : "Visual")}: {(window ? "window" : "whole body")} at level {level}, {slots} slots of {slotSize} px, "
+				+ $"{string.Join(", ", Array.ConvertAll(planes, p => p.layer.name))} ({atlasSize} px atlases, {bytes / 1048576.0:F1} MB)");
 
 			if (window)
 			{
@@ -647,8 +827,8 @@ namespace SCANsat.SCAN_Map
 				return;
 			}
 
-			SCANUtil.SCANlog("[{0}] Mirage Visual window at level {1}: {2} tiles, {3} to read{4}", body.name, level, tiles.Count, placed,
-				placed < missing.Count ? string.Format(", {0} without a slot", missing.Count - placed) : "");
+			SCANUtil.SCANlog("[{0}] Mirage {5} window at level {1}: {2} tiles, {3} to read{4}", body.name, level, tiles.Count, placed,
+				placed < missing.Count ? string.Format(", {0} without a slot", missing.Count - placed) : "", heights ? "heights" : "Visual");
 		}
 
 		// An empty slot, else the least recently wanted landed one this window does not want
@@ -837,7 +1017,7 @@ namespace SCANsat.SCAN_Map
 
 				if (!window)
 				{
-					Log.Message($"[{body.name}] Mirage Visual: whole body at level {level} on the GPU in {clock.Elapsed.TotalSeconds:F2} s");
+					Log.Message($"[{body.name}] Mirage {(heights ? "heights" : "Visual")}: whole body at level {level} on the GPU in {clock.Elapsed.TotalSeconds:F2} s");
 				}
 			}
 		}
@@ -864,7 +1044,7 @@ namespace SCANsat.SCAN_Map
 							continue;
 						}
 
-						data = flatBC5(raw.Length);
+						data = i == normalPlane ? flatBC5(raw.Length) : dark(raw.Length);   // night lights: none
 					}
 
 					NativeArray<byte>.Copy(data, raw, raw.Length);
@@ -896,6 +1076,17 @@ namespace SCANsat.SCAN_Map
 		}
 
 		// A BC5 slot of level normals: every block's two channels at Mirage's flat value, 128
+		// A slot of zero bytes: black in BC4 and R8
+		byte[] dark(int length)
+		{
+			if (darkSlot == null || darkSlot.Length != length)
+			{
+				darkSlot = new byte[length];
+			}
+
+			return darkSlot;
+		}
+
 		byte[] flatBC5(int length)
 		{
 			if (flatNormal == null || flatNormal.Length != length)

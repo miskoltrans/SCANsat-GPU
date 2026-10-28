@@ -54,6 +54,10 @@ namespace SCANsat.SCAN_Map
 				{
 					clearWindowCaches();   // pixel-space caches: a new zoom level is a new window
 				}
+				if (mapscale != value)
+				{
+					heldRangeValid = false;
+				}
 				mapscale = value;
 				resourceMapScale = mapscale * mapwidth / resourceMapWidth;
 			}
@@ -92,7 +96,30 @@ namespace SCANsat.SCAN_Map
 		public mapType MType
 		{
 			get { return mType; }
-			set { mType = value; }
+			set
+			{
+				if (mType != value)
+				{
+					heldRangeValid = false;
+				}
+				mType = value;
+			}
+		}
+
+		/// <summary>true: a window map's fitted palette range only widens from pass to pass, so a height keeps its
+		/// colour while the window moves (the zoom map following its vessel); a new scale, mode or body fits afresh.
+		/// false: each pass fits its own window.</summary>
+		internal bool HoldAutoRange
+		{
+			get { return holdAutoRange; }
+			set
+			{
+				if (holdAutoRange != value)
+				{
+					heldRangeValid = false;
+				}
+				holdAutoRange = value;
+			}
 		}
 
 		public bool ColorMap
@@ -538,9 +565,12 @@ namespace SCANsat.SCAN_Map
 		private double[] biomeIndex;
 		private int startLine;
 		private int stopLine;
+		bool holdAutoRange, heldRangeValid;   // HoldAutoRange, and whether heldMin/heldMax hold a range yet
+		float heldMin, heldMax;
 		double sunLonCenter;
 		double sunLatCenter;
 		double gamma;
+		Vector4 sunDir;   // the subsolar point as a direction, for the night lights (composite shader pass 2)
 
 		internal void setSize(Vector2 size)
 		{
@@ -658,10 +688,16 @@ namespace SCANsat.SCAN_Map
 
 			if (coverageFlags != null) { UnityEngine.Object.Destroy(coverageFlags); coverageFlags = null; }
 			if (compositeMaterial != null) { UnityEngine.Object.Destroy(compositeMaterial); compositeMaterial = null; }
+			if (heightMaterial != null) { UnityEngine.Object.Destroy(heightMaterial); heightMaterial = null; }
+			if (heightTex != null) { heightTex.Release(); UnityEngine.Object.Destroy(heightTex); heightTex = null; }
+			if (heightColumns != null) { UnityEngine.Object.Destroy(heightColumns); heightColumns = null; }
+			if (heightRows != null) { UnityEngine.Object.Destroy(heightRows); heightRows = null; }
 			if (visualRenderTex != null) { visualRenderTex.Release(); UnityEngine.Object.Destroy(visualRenderTex); visualRenderTex = null; }
 			if (exporter != null) { UnityEngine.Object.Destroy(exporter.gameObject); exporter = null; }
 			if (elevationTex != null) { UnityEngine.Object.Destroy(elevationTex); elevationTex = null; }
 			if (biomeIndexTex != null) { UnityEngine.Object.Destroy(biomeIndexTex); biomeIndexTex = null; }
+			elevationUpload.Release();
+			biomeUpload.Release();
 			if (resourceTex != null) { UnityEngine.Object.Destroy(resourceTex); resourceTex = null; }
 			if (paletteLUT != null) { UnityEngine.Object.Destroy(paletteLUT); paletteLUT = null; }
 			if (paletteGreyLUT != null) { UnityEngine.Object.Destroy(paletteGreyLUT); paletteGreyLUT = null; }
@@ -687,7 +723,6 @@ namespace SCANsat.SCAN_Map
 			biome_indexmap = null;
 			biomeRowCached = null;
 			resourceCache = null;
-			gpuRowBuf = null;
 		}
 
 		// The data caches, sized for the mode that is about to run and no other. Altimetry and Slope
@@ -882,7 +917,26 @@ namespace SCANsat.SCAN_Map
 			private int passBuildFrames;
 			private float passBuildStart = -1f;
 			private float passBuildMs;
-			private Color[] gpuRowBuf;
+			private double passSlowestBuildMs, passSlowestCompositeMs;   // the longest frame's two halves
+
+			// A Mirage body's heights for a data pass, drawn from Mirage's height tiles by the composite shader's
+			// height pass and read back into big_heightmap, instead of sampled pixel by pixel on the CPU
+			// (pumpGpuHeights). Off: the CPU samples them, as for every other body. Filling: the read-back texels
+			// go into the caches a few rows a frame, under the build budget - a big map's million in one frame
+			// took 25-35 ms.
+			private enum GpuHeights { Off, Binding, Reading, Filling, Done }
+			private GpuHeights gpuHeights;
+			private float[] heightTexels;   // the readback's texels, kept while Filling (the request's own array is the frame's only)
+			private int heightFillRow;      // Filling: the next row to fill
+			private bool heightFillRange;   // Filling: the auto-range pre-pass is fitted from the texels too
+			private Material heightMaterial;
+			private RenderTexture heightTex;
+			private Texture2D heightColumns, heightRows;   // setHeightCoordinates
+			private bool gpuBiomes;   // the height pass looks the Biome map's biomes up too (biomeTexture)
+			private UnityEngine.Rendering.AsyncGPUReadbackRequest heightRead;
+			// The harness turns it off to hold the GPU's heights against the CPU's
+			internal static bool GpuHeightsAllowed = true;
+			private readonly RowUploader elevationUpload = new RowUploader(), biomeUpload = new RowUploader();
 			private CacheKey resourceGridKey;   // the field resourceCache was sampled from
 			private CacheKey resourceTexKey;    // the grid resourceTex was uploaded from
 			private CacheKey paletteLUTKey;
@@ -912,6 +966,12 @@ namespace SCANsat.SCAN_Map
 		private float outputAlpha = 1f;      // final multiplier on the composite (terrain planet overlay: 0.9)
 		private float resGreyBlend = 0.3f;   // resourceToColor32's Transparency argument for below-range cells
 		private int rangeRow = -1;           // autoRange pre-pass cursor: -1 not started, >= mapheight done
+		private int rangeCol;                // ... and its column within rangeRow
+		private int rowCol;                  // prepRow's column within row mapstep
+		// Time a building map always gets each frame, however much of the shared budget the builders before it
+		// spent: every map makes progress, none waits for the others to finish, and none makes a long frame.
+		// A whole row was the floor, tens of milliseconds where PQS is slow.
+		private const double MinSliceMs = 0.5;
 		private float rangeMin, rangeMax;
 		private int rangeSamples;
 
@@ -923,6 +983,10 @@ namespace SCANsat.SCAN_Map
 
 			bool bodyChanged = body != b;
 			int outgoingBody = body != null ? body.flightGlobalsIndex : -1;   // `body` is reassigned below
+			if (bodyChanged)
+			{
+				heldRangeValid = false;
+			}
 
 			if (bodyChanged)
 			{
@@ -1012,6 +1076,8 @@ namespace SCANsat.SCAN_Map
 			gpuRecolorSweep = false;   // a recolour in flight ends here; the decision below is made afresh. Left set, a mode switch mid-sweep re-Blit the new mode from textures never built for it.
 			sweepStart = -1f;
 			rangeRow = -1;
+			rowCol = 0;
+			gpuHeights = GpuHeights.Off;
 			// An auto-range map on a body with no terrain to fit (the Sun, a gas giant) never runs the pre-pass, and
 			// the empty range it starts with divided by zero in the palette, every frame: it takes the body's
 			// configured range instead, the one its legend already shows
@@ -1029,6 +1095,7 @@ namespace SCANsat.SCAN_Map
 			passBuildFrames = 0;
 			passBuildStart = -1f;
 			passBuildMs = 0f;
+			passSlowestBuildMs = passSlowestCompositeMs = 0;
 			resourceConfigKey = 0;       // new pass: take the resource key again (the field may have changed under us)
 			coverageFlagsDirty = true;   // new pass: refresh the GPU coverage stencil once from live coverage
 			resourceActive = resourceOn;
@@ -1061,6 +1128,9 @@ namespace SCANsat.SCAN_Map
 				}
 
 				gamma = Math.Abs(sunLatCenter) < 0.55 ? 100 : Math.Tan(Mathf.Deg2Rad * (90 - Math.Abs(sunLatCenter)));
+
+				double rlat = sunLat * Mathf.Deg2Rad, rlon = sunLon * Mathf.Deg2Rad;
+				sunDir = new Vector4((float)(Math.Cos(rlat) * Math.Cos(rlon)), (float)Math.Sin(rlat), (float)(Math.Cos(rlat) * Math.Sin(rlon)), 0f);
 			}
 
 			// mType is set (via MType or the resetMap(mode,...) overload) before every call
@@ -1103,6 +1173,13 @@ namespace SCANsat.SCAN_Map
 					dataTexKey.Invalidate();
 					pendingDataKey = configHash;
 					mapstep = 0;
+					if (wantsGpuHeights())
+					{
+						gpuHeights = GpuHeights.Binding;
+						gpuBiomes = mType == mapType.Biome && biomeMap && biome_indexmap != null && biomeRowCached != null
+							&& biome_indexmap.GetLength(0) == mapwidth && biome_indexmap.GetLength(1) == mapheight
+							&& biomeRowCached.Length == mapheight && biomeTexture(body) != null;
+					}
 				}
 			}
 		}
@@ -1245,8 +1322,11 @@ namespace SCANsat.SCAN_Map
 
 			Texture colorTex = null, normalTex = null, gasRamp = null;
 			int normalYChannel = 0;
-			bool mirage = bindMirage(visualTargetWidth(), false, out bool mirageShaded, out bool mirageLoading);
-			if (!mirage)
+			// Only Visual draws from the body's own textures. Asked for in every mode, they cost a body with
+			// Parallax's scaled shader a reload of its textures on every composite of the pass: Parallax
+			// unloads an off-screen body's at once, ~200 ms a frame on Sol's Venus.
+			bool mirage = bindMirage(visualTargetWidth(), false, out bool mirageShaded, out bool mirageLights, out bool mirageLoading);
+			if (!mirage && mType == mapType.Visual)
 			{
 				SCANcontroller.controller.getVisualSource(body, visualTargetWidth(), out colorTex, out normalTex, out normalYChannel, out gasRamp, out _);
 			}
@@ -1333,7 +1413,8 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetColor("_RedlineColor", palette.Red);
 			compositeMaterial.SetFloat("_SweepY", reveal);
 
-			Graphics.Blit(null, visualRenderTex, compositeMaterial);
+			Graphics.Blit(null, visualRenderTex, compositeMaterial, 0);   // pass 0 only: with no pass given Blit draws every pass, the height pass over the map
+			drawLights(visualRenderTex, mirageLights);
 
 			// That Blit was the fully revealed one (no redline). Mirage tiles still streaming in hold the pass
 			// open, so the pump composites again as they land.
@@ -1346,14 +1427,32 @@ namespace SCANsat.SCAN_Map
 		// A Mirage body's Visual map draws from the body's own colour tiles (SCANmirageAtlas): Mirage bodies
 		// ship no equirect colour map, and their ScaledSpace is Mirage's too. Binds them for a map needing
 		// targetWidth pixels across 360 degrees; false for any other body or mode. loading: some tiles are
-		// still to land. shaded: its normals are bound too. wait: block until they have (a one-off render).
-		private bool bindMirage(int targetWidth, bool wait, out bool shaded, out bool loading)
+		// still to land. shaded: its normals are bound too. lights: its night lights. wait: block until they
+		// have (a one-off render).
+		private bool bindMirage(int targetWidth, bool wait, out bool shaded, out bool lights, out bool loading)
 		{
-			shaded = loading = false;
+			shaded = lights = loading = false;
 			bool bound = mType == mapType.Visual && SCANmirage.IsMirageBody(body)
-				&& SCANmirageAtlas.Bind(compositeMaterial, body, targetWidth, mirageWindowFor(), wait, out shaded, out loading);
+				&& SCANmirageAtlas.Bind(compositeMaterial, body, targetWidth, mirageWindowFor(), wait, out shaded, out lights, out loading);
 			compositeMaterial.SetFloat("_MirageColor", bound ? 1f : 0f);
 			return bound;
+		}
+
+		// The harness turns them off to hold a map with them against one without
+		internal static bool LightsAllowed = true;
+
+		// A Mirage body's night lights over its Visual map, just drawn into target by pass 0: the composite
+		// shader's pass 2 adds them, with the terminator on, lit as the body's own material lights them (night
+		// only for Earth, always for Io's lava). A shader bundle from before the pass has two.
+		private void drawLights(RenderTexture target, bool lights)
+		{
+			if (!lights || !LightsAllowed || !terminator || mType != mapType.Visual || profile.PlanetUV || compositeMaterial.passCount < 3)
+			{
+				return;
+			}
+
+			compositeMaterial.SetVector("_SunDir", sunDir);
+			Graphics.Blit(null, target, compositeMaterial, 2);
 		}
 
 		// The ground a window map shows, for the Mirage atlas to fetch the tiles under it at the map's scale:
@@ -1398,8 +1497,9 @@ namespace SCANsat.SCAN_Map
 			return mirageWindow;
 		}
 
-		// A window map's pixel (column, row from the bottom) to the lon/lat it shows, as its data caches are
-		// filled; false off the map (outside a projection's disc).
+		// A window map's pixel (column, row from the bottom) to the lon/lat it shows: where its data caches are
+		// sampled (prepRow, preSampleRangeRow) and its Mirage window's tiles are fetched, so the one formula
+		// serves all three. False off the map (outside a projection's disc).
 		internal bool pixelLonLat(int i, int row, out double lon, out double lat)
 		{
 			double rawLon = (i * 1.0f / mapscale) - 180f + lon_offset;
@@ -1561,7 +1661,7 @@ namespace SCANsat.SCAN_Map
 			if (sweepStart < 0f)
 			{
 				sweepStart = now;
-				sweepDuration = configuredSweepDuration();
+				sweepDuration = profile.TimedSweep ? configuredSweepDuration() : 0f;
 			}
 
 			if (sweepDuration <= 0f)
@@ -1606,8 +1706,8 @@ namespace SCANsat.SCAN_Map
 
 			Texture colorTex = null, normalTex = null, gasRamp = null;
 			int normalYChannel = 0;
-			bool mirageShaded = false;
-			if (!bindMirage(sourceWidth, true, out mirageShaded, out _)
+			bool mirageShaded = false, mirageLights = false;
+			if (!bindMirage(sourceWidth, true, out mirageShaded, out mirageLights, out _)
 				&& !SCANcontroller.controller.getVisualSource(body, sourceWidth, out colorTex, out normalTex, out normalYChannel, out gasRamp, out _))
 			{
 				return null;
@@ -1628,7 +1728,8 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetFloat("_GasGiant", gasRamp != null ? 1f : 0f);
 			setFramingUniforms(w, h, mapscale * k);
 
-			Graphics.Blit(null, rt, compositeMaterial);
+			Graphics.Blit(null, rt, compositeMaterial, 0);
+			drawLights(rt, mirageLights);
 
 			SCANUtil.SCANlog("[{0}] Visual export rendered at {1}x{2} (on-screen {3}x{4})", body.bodyName, w, h, mapwidth, mapheight);
 			return rt;
@@ -1862,8 +1963,8 @@ namespace SCANsat.SCAN_Map
 			return sum;
 		}
 
-		// Ensure the mode's R-float data texture exists (cleared to 0). Rows are then staged by
-		// stageDataRow as the prep fills the cache and uploaded once per frame (buildSlice).
+		// Ensure the mode's R-float data texture exists (cleared to 0). Rows are then staged by a
+		// RowUploader as the prep fills the cache and uploaded once per frame (buildSlice).
 		// A new Texture2D's contents are undefined, so the fresh texture is zeroed through its own raw
 		// CPU buffer - GetRawTextureData<float> is a view over storage Unity has already allocated, not
 		// a copy. The full-size Color[] mirror this replaced cost 16 bytes a pixel, 16 MB standing per
@@ -1880,28 +1981,118 @@ namespace SCANsat.SCAN_Map
 			// TextureFormat.RFloat is one float per pixel, so this view is exactly mapwidth * mapheight
 			// long. global:: because this namespace is SCANsat.SCAN_Map, where a bare "Unity" binds to
 			// SCANsat.Unity rather than to UnityEngine's Unity.Collections.
+			// Cleared a block at a time: a million single writes through the NativeArray indexer were most of a new
+			// big map's first build frame (14-17 ms)
 			global::Unity.Collections.NativeArray<float> raw = tex.GetRawTextureData<float>();
-			for (int i = 0; i < raw.Length; i++)
+			for (int i = 0; i < raw.Length; i += zeroBlock.Length)
 			{
-				raw[i] = 0f;
+				global::Unity.Collections.NativeArray<float>.Copy(zeroBlock, 0, raw, i, Math.Min(zeroBlock.Length, raw.Length - i));
 			}
 			tex.Apply(false);
 		}
 
-		// Stage one geographic row (src column y=row) into the data texture's CPU mirror. No Apply
-		// here: Apply re-uploads the whole texture, so the caller does it once per frame.
-		private void stageDataRow(Texture2D tex, float[,] src, int row)
+		private static readonly float[] zeroBlock = new float[4096];
+
+		/// <summary>
+		/// One data texture's rows on their way to the GPU. Texture2D.Apply re-uploads the whole texture - 4 MB
+		/// for a 1440x720 RFloat map - and a build applied its data textures every frame: the big map's Biome
+		/// frames (two textures) ran to 16-17 ms on a 4 ms budget, Altimetry's (one) to 10 ms. A frame's rows go
+		/// into a strip of StripRows rows instead, which is applied - a few hundred KB - and copied into place on
+		/// the GPU. Without CopyTexture the rows go straight into the texture and it is applied whole, as before.
+		/// The texture's CPU-side copy goes stale; nothing applies it whole again but ensureDataTex's clear,
+		/// which comes before any row is staged.
+		/// </summary>
+		private sealed class RowUploader
 		{
-			if (tex == null || src == null || row < 0 || row >= mapheight) { return; }
-			if (gpuRowBuf == null || gpuRowBuf.Length != mapwidth)
+			private const int StripRows = 32;
+			private static readonly bool canCopy = (SystemInfo.copyTextureSupport & UnityEngine.Rendering.CopyTextureSupport.Basic) != 0;
+			private Texture2D strip;
+			private Texture2D target;
+			private int first, count;
+			private Color[] rowBuf;   // without CopyTexture: SetPixels straight into the texture
+
+			// Row y=row of src (columns x) into the texture, uploaded at the next Flush
+			internal void Stage(Texture2D tex, float[,] src, int row, int width)
 			{
-				gpuRowBuf = new Color[mapwidth];
+				if (!canCopy)
+				{
+					if (rowBuf == null || rowBuf.Length != width)
+					{
+						rowBuf = new Color[width];
+					}
+
+					for (int x = 0; x < width; x++)
+					{
+						rowBuf[x] = new Color(src[x, row], 0f, 0f, 0f);
+					}
+
+					tex.SetPixels(0, row, width, 1, rowBuf);
+					target = tex;
+					count = 1;
+					return;
+				}
+
+				if (count > 0 && (target != tex || count == StripRows || row != first + count || strip.width != width))
+				{
+					Flush();
+				}
+
+				if (strip == null || strip.width != width)
+				{
+					Release();
+					strip = new Texture2D(width, StripRows, TextureFormat.RFloat, false);
+				}
+
+				if (count == 0)
+				{
+					target = tex;
+					first = row;
+				}
+
+				// RFloat: one float per texel, rows of width from the bottom, as SetPixels addresses them
+				global::Unity.Collections.NativeArray<float> texels = strip.GetRawTextureData<float>();
+				int o = count * width;
+				for (int x = 0; x < width; x++)
+				{
+					texels[o + x] = src[x, row];
+				}
+
+				count++;
 			}
-			for (int x = 0; x < mapwidth; x++)
+
+			// The staged rows onto the GPU: once per build frame, and whenever the strip fills
+			internal void Flush()
 			{
-				gpuRowBuf[x] = new Color(src[x, row], 0f, 0f, 0f);
+				if (count == 0 || target == null)
+				{
+					count = 0;
+					return;
+				}
+
+				if (canCopy)
+				{
+					strip.Apply(false);
+					Graphics.CopyTexture(strip, 0, 0, 0, 0, strip.width, count, target, 0, 0, 0, first);
+				}
+				else
+				{
+					target.Apply(false);
+				}
+
+				count = 0;
 			}
-			tex.SetPixels(0, row, mapwidth, 1, gpuRowBuf);
+
+			internal void Release()
+			{
+				if (strip != null)
+				{
+					UnityEngine.Object.Destroy(strip);
+					strip = null;
+				}
+
+				count = 0;
+				target = null;
+			}
 		}
 
 		// Build resourceCache (stock abundance). Nothing else builds it - a pass's first composite calls
@@ -2177,11 +2368,13 @@ namespace SCANsat.SCAN_Map
 		// One row of the auto-range pre-pass: every 4th pixel of row rangeRow, sampled at its unprojected
 		// coordinate into the cache (the build skips those pixels later), min/max accumulated. Same
 		// stride and coordinates as the windows' old calcTerrainLimits, coverage ignored as there.
-		private void preSampleRangeRow()
+		// Returns false when the budget ran out part-way: the row goes on from rangeCol next frame.
+		private bool preSampleRangeRow(long start, long budget)
 		{
 			if (rangeRow < 0)
 			{
 				rangeRow = 0;
+				rangeCol = 0;
 				rangeMin = float.MaxValue;
 				rangeMax = float.MinValue;
 				rangeSamples = 0;
@@ -2191,15 +2384,15 @@ namespace SCANsat.SCAN_Map
 
 			if (row < mapheight && row >= startLine && row <= stopLine && big_heightmap != null)
 			{
-				for (int i = 0; i < mapwidth; i += 4)
+				for (int done = 0; rangeCol < mapwidth; rangeCol += 4, done++)
 				{
-					double lat = (row * 1.0f / mapscale) - 90f + lat_offset;
-					double lon = (i * 1.0f / mapscale) - 180f + lon_offset;
-					double la = lat, lo = lon;
-					lat = unprojectLatitude(lo, la);
-					lon = unprojectLongitude(lo, la);
+					if (done > 0 && System.Diagnostics.Stopwatch.GetTimestamp() - start >= budget)
+					{
+						return false;
+					}
 
-					if (double.IsNaN(lat) || double.IsNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180)
+					int i = rangeCol;
+					if (!pixelLonLat(i, row, out double lon, out double lat))
 					{
 						continue;
 					}
@@ -2224,6 +2417,8 @@ namespace SCANsat.SCAN_Map
 			}
 
 			rangeRow += 4;
+			rangeCol = 0;
+			return true;
 		}
 
 		// calcTerrainLimits' guards, then the range the palette LUT and the legend use.
@@ -2239,6 +2434,20 @@ namespace SCANsat.SCAN_Map
 			if (min >= max)
 			{
 				min = max - 1f;
+			}
+
+			// Held: the range so far, widened to this window's
+			if (holdAutoRange)
+			{
+				if (heldRangeValid)
+				{
+					min = Math.Min(min, heldMin);
+					max = Math.Max(max, heldMax);
+				}
+
+				heldMin = min;
+				heldMax = max;
+				heldRangeValid = true;
 			}
 
 			useCustomRange = true;
@@ -2288,11 +2497,13 @@ namespace SCANsat.SCAN_Map
 			customResourceMax = max;
 		}
 
-		// The biomes present in this map's window, read from the biome index cache once rows are
-		// built (the zoom map's legend lists them). Null until any row is cached.
+		// The biomes this map shows, in the body's order: those of its biome-scanned pixels, read from the
+		// biome index cache once rows are built (the zoom and big maps' legends list them). The cache holds
+		// every pixel's biome, scanned or not - the shader masks the unscanned - so coverage is tested here.
+		// Null until any row is cached.
 		internal List<CBAttributeMapSO.MapAttribute> BiomesInView()
 		{
-			if (body == null || body.BiomeMap == null || biome_indexmap == null || biomeRowCached == null)
+			if (body == null || body.BiomeMap == null || biome_indexmap == null || biomeRowCached == null || data == null)
 			{
 				return null;
 			}
@@ -2300,19 +2511,43 @@ namespace SCANsat.SCAN_Map
 			CBAttributeMapSO.MapAttribute[] atts = body.BiomeMap.Attributes;
 			CBAttributeMapSO.MapAttribute[] pal = SCANUtil.GetOrBuildPalette(body);
 			bool[] seen = new bool[atts.Length];
-			List<CBAttributeMapSO.MapAttribute> list = new List<CBAttributeMapSO.MapAttribute>();
-			bool anyRow = false;
+			int width = biome_indexmap.GetLength(0), height = biome_indexmap.GetLength(1);
 
-			for (int y = 0; y < mapheight && y < biomeRowCached.Length; y++)
+			if (Array.IndexOf(biomeRowCached, true) < 0)
+			{
+				return null;
+			}
+
+			// Biome coverage per 1-degree cell, read once (SCANUtil.isCovered per pixel, through its delegates, took
+			// 12-21 ms on a big map): the test per pixel is then an array read, with isCovered's cell indexing
+			bool[] covered = new bool[360 * 180];
+			int coveredCells = 0;
+			Int16[,] cov = data.Coverage;
+			for (int i = 0; i < 360; i++)
+			{
+				for (int j = 0; j < 180; j++)
+				{
+					if ((cov[i, j] & (Int16)SCANtype.Biome) != 0)
+					{
+						covered[i * 180 + j] = true;
+						coveredCells++;
+					}
+				}
+			}
+
+			bool everywhere = coveredCells == covered.Length;
+			int found = 0;
+
+			for (int y = 0; y < height && y < biomeRowCached.Length && coveredCells > 0 && found < atts.Length; y++)
 			{
 				if (!biomeRowCached[y])
 				{
 					continue;
 				}
 
-				anyRow = true;
+				double rawLat = (y * 1.0f / mapscale) - 90f + lat_offset;   // a geographic cache's grid, as prepRow samples it
 
-				for (int x = 0; x < mapwidth; x++)
+				for (int x = 0; x < width; x++)
 				{
 					int idx = Mathf.RoundToInt(biome_indexmap[x, y] * atts.Length);
 
@@ -2321,12 +2556,40 @@ namespace SCANsat.SCAN_Map
 						continue;
 					}
 
+					if (!everywhere)
+					{
+						double lon, lat = rawLat;
+						if (profile.GeographicCache)
+						{
+							lon = (x * 1.0f / mapscale) - 180f + lon_offset;
+						}
+						else if (!pixelLonLat(x, y, out lon, out lat))
+						{
+							continue;
+						}
+
+						int ilon = ((int)(lon + 360 + 180)) % 360, ilat = ((int)(lat + 180 + 90)) % 180;
+						if (ilon < 0 || ilat < 0 || !covered[ilon * 180 + ilat])
+						{
+							continue;
+						}
+					}
+
 					seen[idx] = true;
+					found++;
+				}
+			}
+
+			List<CBAttributeMapSO.MapAttribute> list = new List<CBAttributeMapSO.MapAttribute>();
+			for (int idx = 0; idx < atts.Length; idx++)
+			{
+				if (seen[idx])
+				{
 					list.Add(pal != null && idx < pal.Length && pal[idx] != null ? pal[idx] : atts[idx]);
 				}
 			}
 
-			return anyRow ? list : null;
+			return list;
 		}
 
 		// Composite this map once more at w x h into a fresh RenderTexture (the caller releases it). The
@@ -2345,7 +2608,7 @@ namespace SCANsat.SCAN_Map
 
 			setFramingUniforms(w, h, mapscale * w / mapwidth);
 
-			Graphics.Blit(null, rt, compositeMaterial);
+			Graphics.Blit(null, rt, compositeMaterial, 0);
 			return rt;
 		}
 
@@ -2403,13 +2666,14 @@ namespace SCANsat.SCAN_Map
 		// The CPU sampling for one map row: elevation into big_heightmap where the cache has none, and in
 		// Biome mode the biome index into biomeIndex. buildSlice stages the results into the data
 		// textures; the shader does all the colourising, and reads its own neighbouring texels for the
-		// slope and the biome borders, so no row needs another row sampled first.
-		private void prepRow(int row)
+		// slope and the biome borders, so no row needs another row sampled first. Returns false when the
+		// budget ran out part-way: the row goes on from rowCol next frame.
+		private bool prepRow(int row, long start, long budget)
 		{
 			// RPM reserved rows: the shader draws them clear, so nothing is sampled for them.
 			if (row < startLine || row > stopLine)
 			{
-				return;
+				return true;
 			}
 
 			// Biome rows are cached in biome_indexmap (per body and size, and per window for a pixel-space
@@ -2422,13 +2686,19 @@ namespace SCANsat.SCAN_Map
 
 			if (!wantBiome && !wantElev)
 			{
-				return;
+				return true;
 			}
 
 			double rawLat = (row * 1.0f / mapscale) - 90f + lat_offset;
 
-			for (int i = 0; i < mapwidth; i++)
+			for (int done = 0; rowCol < mapwidth; rowCol++, done++)
 			{
+				if (done > 0 && System.Diagnostics.Stopwatch.GetTimestamp() - start >= budget)
+				{
+					return false;
+				}
+
+				int i = rowCol;
 				// Column i's longitude on the map's raw grid. (A planet overlay's pixels run the planet's
 				// way, but its caches are geographic: the shader maps each pixel back to the true longitude
 				// and reads them there, so nothing here needs the planet's layout.)
@@ -2445,9 +2715,7 @@ namespace SCANsat.SCAN_Map
 
 					if (!profile.GeographicCache)
 					{
-						sampleLat = unprojectLatitude(rawLon, rawLat);
-						sampleLon = unprojectLongitude(rawLon, rawLat);
-						onMap = !(double.IsNaN(sampleLat) || double.IsNaN(sampleLon) || sampleLat < -90 || sampleLat > 90 || sampleLon < -180 || sampleLon > 180);
+						onMap = pixelLonLat(i, row, out sampleLon, out sampleLat);
 					}
 
 					if (onMap)
@@ -2478,16 +2746,10 @@ namespace SCANsat.SCAN_Map
 				// unprojected coordinate, where the shader reads it by pixel uv.
 				double lat = rawLat, lon = rawLon;
 
-				if (!profile.GeographicCache)
+				if (!profile.GeographicCache && !pixelLonLat(i, row, out lon, out lat))
 				{
-					lat = unprojectLatitude(rawLon, rawLat);
-					lon = unprojectLongitude(rawLon, rawLat);
-
-					if (double.IsNaN(lat) || double.IsNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180)
-					{
-						biomeIndex[i] = 0;
-						continue;
-					}
+					biomeIndex[i] = 0;
+					continue;
 				}
 
 				// One biome lookup per pixel: the shader colourises from _BiomeLUT[biomeIndex] (stock
@@ -2495,6 +2757,358 @@ namespace SCANsat.SCAN_Map
 				passBiomeSamples++;
 				biomeIndex[i] = SCANUtil.getBiomeIndexFraction(body, lon, lat);
 			}
+
+			rowCol = 0;
+			return true;
+		}
+
+		// Whether a data pass about to build takes its heights from the GPU: a Mirage body, a mode that samples
+		// elevation the way prepRow does (not the prebuilt 1-degree grid), and a shader with the height pass
+		private bool wantsGpuHeights()
+		{
+			bool wantElev = mType == mapType.Altimetry || mType == mapType.Slope || (mType == mapType.Biome && profile.BiomeUnderlay);
+			if (!GpuHeightsAllowed || !wantElev || !pqs || big_heightmap == null || heightGridPass || profile.PlanetUV
+				|| !SCANmirage.IsMirageBody(body) || !SystemInfo.SupportsRenderTextureFormat(RenderTextureFormat.ARGBFloat))
+			{
+				return false;
+			}
+
+			Shader shader = SCAN_UI_Loader.VisualCompositeShader;
+			if (shader == null)
+			{
+				return false;
+			}
+
+			if (heightMaterial == null || heightMaterial.shader != shader)
+			{
+				if (heightMaterial != null) { UnityEngine.Object.Destroy(heightMaterial); }
+				heightMaterial = new Material(shader);
+			}
+
+			return heightMaterial.passCount > 1;   // a shader bundle from before the height pass has one
+		}
+
+		// One frame of the GPU height pass. True once the heights are in big_heightmap, or once it has handed
+		// them back to the CPU (Off): no height tiles the GPU can read, or not at the level the CPU would sample.
+		private bool pumpGpuHeights(long start, long budget)
+		{
+			if (gpuHeights == GpuHeights.Binding)
+			{
+				// At the level the CPU would sample, or not at all: nothing is read for a level the GPU cannot match
+				if (!SCANmirageAtlas.BindHeights(heightMaterial, body, mirageSampleLevel(), mirageWindowFor(), out bool loading))
+				{
+					gpuHeights = GpuHeights.Off;
+					return true;
+				}
+
+				if (loading)
+				{
+					return false;   // tiles still landing
+				}
+
+				if (heightTex == null || heightTex.width != mapwidth || heightTex.height != mapheight)
+				{
+					if (heightTex != null) { heightTex.Release(); UnityEngine.Object.Destroy(heightTex); }
+					heightTex = new RenderTexture(mapwidth, mapheight, 0, RenderTextureFormat.ARGBFloat, RenderTextureReadWrite.Linear)
+					{
+						filterMode = FilterMode.Point,
+						wrapMode = TextureWrapMode.Clamp,
+					};
+					heightTex.Create();
+				}
+
+				updateCoverageFlags();
+				heightMaterial.SetTexture("_CoverageFlags", coverageFlags);
+				heightMaterial.SetFloat("_MapWidth", mapwidth);
+				heightMaterial.SetFloat("_MapHeight", mapheight);
+				heightMaterial.SetFloat("_MapScale", (float)mapscale);
+				heightMaterial.SetFloat("_LonOffset", (float)lon_offset);
+				heightMaterial.SetFloat("_LatOffset", (float)lat_offset);
+				heightMaterial.SetFloat("_Projection", (float)(int)projection);
+				heightMaterial.SetFloat("_CenteredLon", (float)centeredLong);
+				heightMaterial.SetFloat("_CenteredLat", (float)centeredLat);
+				heightMaterial.SetFloat("_PixelSpace", profile.GeographicCache ? 0f : 1f);
+				setHeightCoordinates();
+				Graphics.Blit(null, heightTex, heightMaterial, 1);
+
+				if (!SystemInfo.supportsAsyncGPUReadback)
+				{
+					// Read it back at once instead: a stall of a few milliseconds, once a pass
+					Texture2D read = new Texture2D(mapwidth, mapheight, TextureFormat.RGBAFloat, false, true);
+					RenderTexture prev = RenderTexture.active;
+					RenderTexture.active = heightTex;
+					read.ReadPixels(new Rect(0, 0, mapwidth, mapheight), 0, 0, false);
+					RenderTexture.active = prev;
+					beginHeightFill(read.GetRawTextureData<float>());
+					UnityEngine.Object.Destroy(read);
+					return fillHeightRows(start, budget);
+				}
+
+				heightRead = UnityEngine.Rendering.AsyncGPUReadback.Request(heightTex);
+				gpuHeights = GpuHeights.Reading;
+				return false;
+			}
+
+			if (gpuHeights == GpuHeights.Reading)
+			{
+				if (!heightRead.done)
+				{
+					return false;
+				}
+
+				if (heightRead.hasError)
+				{
+					gpuHeights = GpuHeights.Off;
+					return true;
+				}
+
+				beginHeightFill(heightRead.GetData<float>());
+			}
+
+			if (gpuHeights == GpuHeights.Filling)
+			{
+				return fillHeightRows(start, budget);
+			}
+
+			return true;
+		}
+
+		// Where the height pass's pixels are, worked out here in double as prepRow does: the GPU's own sin, cos
+		// and inverse trig put a steep slope's heights tenths of a texel out. Each column's raw longitude and
+		// each row's raw latitude, with their cos and sin (and for a column which of |cos| and |sin| is larger,
+		// for the cube-face tie the float direction loses), and an orthographic window's centre and the east
+		// and north there, which turn its plane points into directions with no trig at all.
+		private void setHeightCoordinates()
+		{
+			// Biomes: Kopernicus's map as a texture, and the biome map texel each column and row falls on
+			Texture2D biomes = gpuBiomes ? biomeTexture(body) : null;
+			int bw = biomes != null ? biomes.width : 1, bh = biomes != null ? biomes.height : 1;
+			heightMaterial.SetTexture("_BiomeMap", biomes);
+			heightMaterial.SetVector("_BiomeMapSize", new Vector4(bw, bh, biomes != null ? body.BiomeMap.Attributes.Length : 1, biomes != null ? 1f : 0f));
+
+			// A table's first row the coordinate itself, its second the biome map's
+			Color[] columns = new Color[2 * mapwidth];
+			for (int i = 0; i < mapwidth; i++)
+			{
+				double raw = (i * 1.0f / mapscale) - 180f + lon_offset;
+				double r = Mathf.Deg2Rad * raw;
+				double c = Math.Cos(r), s = Math.Sin(r);
+				columns[i] = new Color((float)c, (float)s, (float)raw, Math.Abs(c) >= Math.Abs(s) ? 1f : 0f);
+				columns[mapwidth + i] = new Color((float)biomeColumn(raw, bw), 0f, 0f, 0f);
+			}
+
+			Color[] rows = new Color[2 * mapheight];
+			for (int j = 0; j < mapheight; j++)
+			{
+				double raw = (j * 1.0f / mapscale) - 90f + lat_offset;
+				double r = Mathf.Deg2Rad * raw;
+				rows[j] = new Color((float)Math.Cos(r), (float)Math.Sin(r), (float)raw, 0f);
+				// Past a pole the CPU's unprojection turns the latitude back and the longitude half round
+				bool flipped = !profile.GeographicCache && (raw > 90 || raw < -90);
+				double lat = raw > 90 ? 180 - raw : raw < -90 ? -180 - raw : raw;
+				rows[mapheight + j] = new Color((float)biomeRow(profile.GeographicCache ? raw : lat, bh), flipped ? 1f : 0f, 0f, 0f);
+			}
+
+			heightMaterial.SetTexture("_HeightColumns", coordinateTable(ref heightColumns, columns));
+			heightMaterial.SetTexture("_HeightRows", coordinateTable(ref heightRows, rows));
+
+			double lon0 = Mathf.Deg2Rad * centeredLong, lat0 = Mathf.Deg2Rad * centeredLat;
+			heightMaterial.SetVector("_OrthoCentre", new Vector4((float)(Math.Cos(lat0) * Math.Cos(lon0)), (float)Math.Sin(lat0), (float)(Math.Cos(lat0) * Math.Sin(lon0)), 0f));
+			heightMaterial.SetVector("_OrthoEast", new Vector4((float)-Math.Sin(lon0), 0f, (float)Math.Cos(lon0), 0f));
+			heightMaterial.SetVector("_OrthoNorth", new Vector4((float)(-Math.Sin(lat0) * Math.Cos(lon0)), (float)Math.Cos(lat0), (float)(-Math.Sin(lat0) * Math.Sin(lon0)), 0f));
+			heightMaterial.SetVector("_OrthoMeridian", new Vector4((float)Math.Cos(lon0), 0f, (float)Math.Sin(lon0), 0f));
+		}
+
+		// Kopernicus's GetAtt and GetBilinearCoordinates, for a longitude or a latitude in degrees: where it falls
+		// on a biome map that many texels wide or high, as KopernicusCBAttributeMapSO.GetPixelBiome reads it
+		private static double biomeColumn(double lonDeg, int width)
+		{
+			double lon = Mathf.Deg2Rad * lonDeg - Math.PI / 2.0;
+			if (lon < 0.0)
+			{
+				lon += Math.PI * 2.0;
+			}
+
+			lon %= Math.PI * 2.0;
+			double x = 1.0 - lon * (1.0 / (2.0 * Math.PI));
+			return Math.Abs(x - Math.Floor(x)) * width;
+		}
+
+		private static double biomeRow(double latDeg, int height)
+		{
+			double y = Mathf.Deg2Rad * latDeg * (1.0 / Math.PI) + 0.5;
+			y = y >= 1.0 ? 1.0 - 1.1102230246251565E-16 : Math.Max(y, 0.0);
+			return y * height;
+		}
+
+		// Kopernicus keeps a body's biome map as one biome index per texel (KopernicusCBAttributeMapSO), which the
+		// height pass looks biomes up in as its GetAtt does: that, as an R8 texture, once per body and scene.
+		// Null for any other kind of map, and the CPU looks them up.
+		private static readonly Dictionary<CelestialBody, Texture2D> biomeTextures = new Dictionary<CelestialBody, Texture2D>();
+		private static readonly System.Reflection.FieldInfo mapData = typeof(MapSO).GetField("_data", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+		private static readonly System.Reflection.FieldInfo mapWidth = typeof(MapSO).GetField("_width", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+		private static readonly System.Reflection.FieldInfo mapHeight = typeof(MapSO).GetField("_height", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+		private static readonly System.Reflection.FieldInfo mapRowWidth = typeof(MapSO).GetField("_rowWidth", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+		private static readonly System.Reflection.FieldInfo mapBpp = typeof(MapSO).GetField("_bpp", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+		private static Texture2D biomeTexture(CelestialBody body)
+		{
+			if (biomeTextures.TryGetValue(body, out Texture2D tex))
+			{
+				return tex;
+			}
+
+			tex = null;
+			try
+			{
+				CBAttributeMapSO map = body.BiomeMap;
+				if (map != null && map.GetType().FullName == "Kopernicus.Components.KopernicusCBAttributeMapSO" && map.Attributes.Length <= 256
+					&& mapData != null && SystemInfo.SupportsTextureFormat(TextureFormat.R8))
+				{
+					byte[] data = mapData.GetValue(map) as byte[];
+					int w = (int)mapWidth.GetValue(map), h = (int)mapHeight.GetValue(map);
+					if (data != null && (int)mapBpp.GetValue(map) == 1 && (int)mapRowWidth.GetValue(map) == w && data.Length >= w * h
+						&& w <= SystemInfo.maxTextureSize && h <= SystemInfo.maxTextureSize)
+					{
+						tex = new Texture2D(w, h, TextureFormat.R8, false, true)
+						{
+							name = "SCANsat biome map " + body.name,
+							filterMode = FilterMode.Point,
+							wrapMode = TextureWrapMode.Clamp,
+						};
+						global::Unity.Collections.NativeArray<byte> raw = tex.GetRawTextureData<byte>();
+						global::Unity.Collections.NativeArray<byte>.Copy(data, raw, w * h);
+						tex.Apply(false, true);
+						SCANUtil.SCANlog("[{0}] biome map on the GPU: {1}x{2}, {3} biomes", body.bodyName, w, h, map.Attributes.Length);
+					}
+				}
+			}
+			catch (Exception e)
+			{
+				KSPCommunityLib.Logging.Log.Exception(e);
+				if (tex != null) { UnityEngine.Object.Destroy(tex); }
+				tex = null;
+			}
+
+			biomeTextures[body] = tex;
+			return tex;
+		}
+
+		/// <summary>Free the biome maps the height pass uploaded (SCANcontroller, with the scene).</summary>
+		internal static void ReleaseBiomeTextures()
+		{
+			foreach (Texture2D tex in biomeTextures.Values)
+			{
+				if (tex != null) { UnityEngine.Object.Destroy(tex); }
+			}
+
+			biomeTextures.Clear();
+		}
+
+		// A table texture: its texels in rows of the map's width (or height)
+		private static Texture2D coordinateTable(ref Texture2D table, Color[] texels)
+		{
+			int width = texels.Length / 2;
+			if (table == null || table.width != width)
+			{
+				if (table != null) { UnityEngine.Object.Destroy(table); }
+				table = new Texture2D(width, 2, TextureFormat.RGBAFloat, false, true)
+				{
+					filterMode = FilterMode.Point,
+					wrapMode = TextureWrapMode.Clamp,
+				};
+			}
+
+			table.SetPixels(texels);
+			table.Apply(false);
+			return table;
+		}
+
+		// The height pass's texels (height, scanned, biome) into big_heightmap as the CPU would have left it:
+		// where Altimetry is scanned (prepRow), and at the auto-range pre-pass's every 4th pixel of every 4th row,
+		// scanned or not (preSampleRangeRow) - whose range is fitted here too, from those pixels, as there. Off
+		// the map stays 0. The biomes into biome_indexmap, every pixel of every row, as prepRow does them.
+		// Copied out of the readback first, then filled a few rows a frame (fillHeightRows).
+		private void beginHeightFill(global::Unity.Collections.NativeArray<float> texels)
+		{
+			if (heightTexels == null || heightTexels.Length != texels.Length)
+			{
+				heightTexels = new float[texels.Length];
+			}
+
+			texels.CopyTo(heightTexels);
+			heightFillRow = Math.Max(0, startLine);
+			heightFillRange = profile.AutoRange && (mType == mapType.Altimetry || mType == mapType.Biome) && rangeRow < mapheight;
+			if (heightFillRange)
+			{
+				rangeMin = float.MaxValue;
+				rangeMax = float.MinValue;
+				rangeSamples = 0;
+			}
+
+			gpuHeights = GpuHeights.Filling;
+		}
+
+		// Rows of the read-back texels into the caches, at least one, then while the budget lasts. True once
+		// every row is in (Done).
+		private bool fillHeightRows(long start, long budget)
+		{
+			if (heightTexels == null || heightTexels.Length < 4 * mapwidth * mapheight)
+			{
+				gpuHeights = GpuHeights.Off;   // the map changed size under the readback: the CPU samples instead
+				return true;
+			}
+
+			float[] texels = heightTexels;
+			int lastRow = Math.Min(stopLine, mapheight - 1);
+			for (int filled = 0; heightFillRow <= lastRow; heightFillRow++, filled++)
+			{
+				if (filled > 0 && System.Diagnostics.Stopwatch.GetTimestamp() - start >= budget)
+				{
+					return false;
+				}
+
+				int row = heightFillRow;
+				for (int i = 0; i < mapwidth; i++)
+				{
+					int k = 4 * (row * mapwidth + i);
+					float h = texels[k], scanned = texels[k + 1];
+					if (gpuBiomes)
+					{
+						biome_indexmap[i, row] = texels[k + 2];
+						passBiomeSamples++;
+					}
+
+					bool rangeCell = heightFillRange && scanned > -0.5f && (row & 3) == 0 && (i & 3) == 0;
+					if (scanned > 0.5f || rangeCell)
+					{
+						big_heightmap[i, row] = h;
+						passHeightSamples++;
+					}
+
+					if (rangeCell)
+					{
+						float v = h == -0.001f ? 0f : h;
+						if (v < rangeMin) { rangeMin = v; }
+						if (v > rangeMax) { rangeMax = v; }
+						rangeSamples++;
+					}
+				}
+
+				if (gpuBiomes)
+				{
+					biomeRowCached[row] = true;
+				}
+			}
+
+			if (heightFillRange)
+			{
+				rangeRow = mapheight;
+				applyAutoTerrainRange();
+			}
+
+			gpuHeights = GpuHeights.Done;
+			return true;
 		}
 
 		// One frame's slice of a data pass (Altimetry / Slope / Biome): rows sampled under the per-frame
@@ -2505,8 +3119,7 @@ namespace SCANsat.SCAN_Map
 		private bool buildSlice()
 		{
 			long start = System.Diagnostics.Stopwatch.GetTimestamp();
-			long budget = claimBuildBudget();
-			bool elevDirty = false, biomeDirty = false;
+			long budget = Math.Max(claimBuildBudget(), (long)(MinSliceMs * System.Diagnostics.Stopwatch.Frequency / 1000.0));
 
 			if (biomeRowCached == null || biomeRowCached.Length != mapheight)
 			{
@@ -2519,6 +3132,13 @@ namespace SCANsat.SCAN_Map
 			}
 			passBuildFrames++;
 
+			// A Mirage body's heights come off the GPU and into the caches over a few frames; nothing to show until they are in
+			if (gpuHeights != GpuHeights.Off && gpuHeights != GpuHeights.Done && !pumpGpuHeights(start, budget))
+			{
+				reportBuildBudgetUsed(System.Diagnostics.Stopwatch.GetTimestamp() - start);
+				return false;
+			}
+
 			// Auto range (zoom map, RPM): before any row is built or revealed, sample every 4th pixel of
 			// the window into the cache and fit the palette range to what is there - what the windows'
 			// calcTerrainLimits did synchronously before each reset, now under the budget. Rows start only
@@ -2527,7 +3147,10 @@ namespace SCANsat.SCAN_Map
 			{
 				while (rangeRow < mapheight)
 				{
-					preSampleRangeRow();
+					if (!preSampleRangeRow(start, budget))
+					{
+						break;   // part-way through a row: the rest next frame
+					}
 
 					if (rangeRow >= mapheight)
 					{
@@ -2548,11 +3171,15 @@ namespace SCANsat.SCAN_Map
 				}
 			}
 
-			// At least one row per frame, however long it takes, then as many as fit the budget. Row
-			// mapstep is sampled and staged in the same step; the shader reads neighbouring rows itself.
+			// At least MinSliceMs of pixels per frame, then as many as fit the budget; a row the budget cuts
+			// short goes on next frame. Row mapstep is staged once it is all sampled; the shader reads
+			// neighbouring rows itself.
 			while (mapstep < mapheight)
 			{
-				prepRow(mapstep);
+				if (!prepRow(mapstep, start, budget))
+				{
+					break;
+				}
 
 				// Biome: biomeIndex is this row's fresh lookup, or biome_indexmap already holds it.
 				if (mType == mapType.Biome && biome_indexmap != null)
@@ -2566,8 +3193,7 @@ namespace SCANsat.SCAN_Map
 						biomeRowCached[mapstep] = true;
 					}
 					ensureDataTex(ref biomeIndexTex, true);
-					stageDataRow(biomeIndexTex, biome_indexmap, mapstep);
-					biomeDirty = true;
+					biomeUpload.Stage(biomeIndexTex, biome_indexmap, mapstep, mapwidth);
 				}
 				// Only a mode that samples elevation gets an elevation texture. A Biome map with no
 				// underlay (the small map, the biome planet overlay) staged a full row of zeros per row
@@ -2576,8 +3202,7 @@ namespace SCANsat.SCAN_Map
 				if (big_heightmap != null)
 				{
 					ensureDataTex(ref elevationTex);
-					stageDataRow(elevationTex, big_heightmap, mapstep);
-					elevDirty = true;
+					elevationUpload.Stage(elevationTex, big_heightmap, mapstep, mapwidth);
 				}
 
 				mapstep++;
@@ -2591,8 +3216,8 @@ namespace SCANsat.SCAN_Map
 				}
 			}
 
-			if (elevDirty) { elevationTex.Apply(false); }
-			if (biomeDirty) { biomeIndexTex.Apply(false); }
+			elevationUpload.Flush();
+			biomeUpload.Flush();
 
 			reportBuildBudgetUsed(System.Diagnostics.Stopwatch.GetTimestamp() - start);
 
@@ -2635,7 +3260,10 @@ namespace SCANsat.SCAN_Map
 
 			ensureRenderTex();
 
-			if (mapstep < mapheight && !buildSlice())
+			long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+			bool built = mapstep >= mapheight || buildSlice();
+			passSlowestBuildMs = Math.Max(passSlowestBuildMs, (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+			if (!built)
 			{
 				return;   // the auto-range pre-pass is still running: nothing to show yet, the target keeps the previous pass
 			}
@@ -2645,7 +3273,9 @@ namespace SCANsat.SCAN_Map
 				return;   // no reveal (the planet overlay): nothing is shown mid-build, one composite when it is done
 			}
 
+			t0 = System.Diagnostics.Stopwatch.GetTimestamp();
 			composite();
+			passSlowestCompositeMs = Math.Max(passSlowestCompositeMs, (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
 
 			if (!passComplete)
 			{
@@ -2659,8 +3289,9 @@ namespace SCANsat.SCAN_Map
 			}
 			else if (passBuildStart >= 0f)
 			{
-				SCANUtil.SCANlog("[{0}] {1} GPU pass {2}x{3}: build {4} frames / {5:F0} ms ({6} height samples, {7} biome lookups), pass total {8:F2} s",
-					body.bodyName, mType, mapwidth, mapheight, passBuildFrames, passBuildMs, passHeightSamples, passBiomeSamples, Time.realtimeSinceStartup - passBuildStart);
+				SCANUtil.SCANlog("[{0}] {1} GPU pass {2}x{3}: build {4} frames / {5:F0} ms ({6} height samples{11}, {7} biome lookups), pass total {8:F2} s, longest build {9:F1} ms, longest composite {10:F1} ms",
+					body.bodyName, mType, mapwidth, mapheight, passBuildFrames, passBuildMs, passHeightSamples, passBiomeSamples, Time.realtimeSinceStartup - passBuildStart,
+					passSlowestBuildMs, passSlowestCompositeMs, gpuHeights == GpuHeights.Done ? " from the GPU" : "");
 				passBuildStart = -1f;   // one line per pass
 			}
 		}

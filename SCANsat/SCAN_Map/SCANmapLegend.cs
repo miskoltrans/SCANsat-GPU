@@ -29,6 +29,7 @@ namespace SCANsat.SCAN_Map
 		private bool legendScheme;
 		private bool stockScheme;
 		private CelestialBody body;
+		private string[] legendBiomes;   // the biomes the biome legend was drawn for, in its order
 
 		public Texture2D Legend
 		{
@@ -99,7 +100,14 @@ namespace SCANsat.SCAN_Map
 
 		public Texture2D getLegend(SCANdata data, bool color, bool stock, CBAttributeMapSO.MapAttribute[] biomes, bool reset = false)
 		{
-			if (legend != null && legendScheme == color && stockScheme == stock && body == data.Body && !reset)
+			// The list is part of the key: the maps list only the biomes they show, which grows with coverage
+			bool sameBiomes = legendBiomes != null && legendBiomes.Length == biomes.Length;
+			for (int k = 0; sameBiomes && k < biomes.Length; k++)
+			{
+				sameBiomes = legendBiomes[k] == biomes[k].name;
+			}
+
+			if (legend != null && legendScheme == color && stockScheme == stock && body == data.Body && sameBiomes && !reset)
 			{
 				return legend;
 			}
@@ -111,6 +119,16 @@ namespace SCANsat.SCAN_Map
 			body = data.Body;
 			legendScheme = color;
 			stockScheme = stock;
+			legendBiomes = new string[biomes.Length];
+			for (int k = 0; k < biomes.Length; k++)
+			{
+				legendBiomes[k] = biomes[k].name;
+			}
+
+			// The gradient and greyscale colour a biome by its index in the body, as the map does: the
+			// legends list only the biomes the map shows
+			CBAttributeMapSO.MapAttribute[] atts = body.BiomeMap != null ? body.BiomeMap.Attributes : null;
+			int bodyCount = atts != null && atts.Length > 0 ? atts.Length : biomes.Length;
 
 			Color32[] pix = new Color32[256];
 
@@ -120,6 +138,9 @@ namespace SCANsat.SCAN_Map
 				int start = (int)Math.Round(biome_idx * 256 / (count * 1d));
 				int end = (int)Math.Round((biome_idx + 1) * 256 / (count * 1d));
 
+				int bodyIdx = atts != null ? Array.FindIndex(atts, a => a.name == biomes[biome_idx].name) : -1;
+				float t = (bodyIdx >= 0 ? bodyIdx : biome_idx) / (bodyCount * 1f);
+
 				for (int i = start; i < end; i++)
 				{
 					if (stock && color)
@@ -128,11 +149,11 @@ namespace SCANsat.SCAN_Map
 					}
 					else if (color)
 					{
-						pix[i] = palette.lerp(SCANcontroller.controller.lowBiomeColor32, SCANcontroller.controller.highBiomeColor32, (float)((biome_idx * 1f) / (count * 1f)));
+						pix[i] = palette.lerp(SCANcontroller.controller.lowBiomeColor32, SCANcontroller.controller.highBiomeColor32, t);
 					}
 					else
 					{
-						pix[i] = palette.lerp(palette.Black, palette.White, (float)(biome_idx * 1f) / (count * 1f));
+						pix[i] = palette.lerp(palette.Black, palette.White, t);
 					}
 				}
 			}

@@ -666,6 +666,43 @@ namespace SCANsat.SCAN_Unity
 			}
 		}
 
+		// A right click on the map: the zoom map opens there, as from the big map. position runs 0-1 across the
+		// map, which is the whole body, rectangular, south at the bottom.
+		public void ClickMap(Vector2 position)
+		{
+			if (visualMap == null || visualMap.Body == null || SCANcontroller.controller.zoomMapVesselLock || SCAN_UI_ZoomMap.Instance == null)
+			{
+				return;
+			}
+
+			if (SCAN_UI_ZoomMap.Instance.IsVisible)
+			{
+				SCAN_UI_ZoomMap.Instance.Close();
+			}
+
+			SCAN_UI_ZoomMap.Instance.Open(false, -90 + 180 * position.y, -180 + 360 * position.x, visualMap);
+		}
+
+		public Sprite ZoomMapIcon
+		{
+			get
+			{
+				GameObject toolbar = SCAN_UI_Loader.ToolbarPrefab;
+				SCANsat.Unity.Unity.SCAN_Toolbar t = toolbar != null ? toolbar.GetComponent<SCANsat.Unity.Unity.SCAN_Toolbar>() : null;
+				return t != null ? t.ZoomMapIcon : null;
+			}
+		}
+
+		public string ZoomHereTooltip
+		{
+			get { return KSP.Localization.Localizer.Format("#autoLOC_SCANsat_mainMapZoomHere"); }
+		}
+
+		public GameObject TooltipPrefab
+		{
+			get { return SCAN_UI_Loader.TooltipPrefab; }
+		}
+
 		public void OpenOverlay()
 		{
 			if (SCAN_UI_Overlay.Instance.IsVisible)

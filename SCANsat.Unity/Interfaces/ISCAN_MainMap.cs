@@ -60,6 +60,14 @@ namespace SCANsat.Unity.Interfaces
 
 		void OpenZoomMap();
 
+		void ClickMap(Vector2 position);
+
+		Sprite ZoomMapIcon { get; }
+
+		string ZoomHereTooltip { get; }
+
+		GameObject TooltipPrefab { get; }
+
 		void OpenSettings();
 
 		void OpenOverlay();

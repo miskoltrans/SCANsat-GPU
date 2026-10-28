@@ -51,6 +51,10 @@ Shader "Hidden/SCANsat/VisualComposite"
 		_MirageDetailTiles ("Mirage Window Colour Tiles", 2D) = "gray" {}
 		_MirageDetailNormals ("Mirage Window Normal Tiles", 2D) = "gray" {}
 		_MirageDetailIndirection ("Mirage Window Tile Slots", 2D) = "black" {}
+		_MirageEmissive ("Mirage Night Light Tiles", 2D) = "black" {}
+		_MirageDetailEmissive ("Mirage Window Night Light Tiles", 2D) = "black" {}
+		_EmissiveColor ("Night Light Tint", Color) = (1,1,1,1)
+		_EmissiveLightMode ("Night Light Mode (-1 night, 0 always, 1 day)", Float) = -1
 		_HasElevation ("Has Elevation", Float) = 1
 		_OutputAlpha ("Output Alpha", Float) = 1
 		_ResGreyBlend ("Resource Below-Range Or Empty Grey Blend", Float) = 0.3
@@ -59,14 +63,9 @@ Shader "Hidden/SCANsat/VisualComposite"
 	{
 		Cull Off ZWrite Off ZTest Always
 
-		Pass
-		{
-			CGPROGRAM
-			#pragma vertex vert_img
-			#pragma fragment frag
-			// tex2Dgrad / tex2Dlod below: shader model 3.0. Without this Unity assumes 2.5
-			// (D3D11 ps_4_0_level_9_3), which has neither.
-			#pragma target 3.0
+		// Uniforms and helpers of both passes. A pass compiles only what it uses, so the height pass's few
+		// samplers do not count against the map pass's limit (16 on D3D11 and Metal, all taken).
+		CGINCLUDE
 			#include "UnityCG.cginc"
 
 			sampler2D _ScaledColor;
@@ -117,6 +116,32 @@ Shader "Hidden/SCANsat/VisualComposite"
 			sampler2D _MirageDetailIndirection;
 			float _MirageDetailLevel;            // tiles per face edge at the window's level
 			float4 _MirageDetailAtlas;           // x = slots per atlas row, y = 1 / atlas px
+			// Night lights (pass 2): Mirage's emissive tiles in the colour tiles' slots, one channel (BC4), tinted and
+			// lit as the body's own material has them - _EmissiveLightMode -1 at night, 0 always, 1 by day
+			sampler2D _MirageEmissive;
+			sampler2D _MirageDetailEmissive;
+			float4 _EmissiveColor;
+			float _EmissiveLightMode;
+			float4 _SunDir;   // the subsolar point as a direction, the way mirageLocate makes one from a lon/lat
+			// The height pass binds a body's height atlases to the same names; a tile holds fractions of the
+			// PQSMod's span: offset + scale * h metres
+			float _MirageHeightScale;
+			float _MirageHeightOffset;
+			// Where the height pass's pixels are, from SCANmap in double: each column's and row's raw coordinate
+			// (r cos, g sin, b degrees; a column's a: 1 where |cos| beats |sin|, for the face tie), and an
+			// orthographic window's centre, east and north. The GPU's own trig is tenths of a texel out. A table's
+			// second row: the biome map texel the column's longitude (r) or the row's latitude (r) falls on, and
+			// for a row past a pole (g = 1) the longitude half the map round.
+			sampler2D _HeightColumns;
+			sampler2D _HeightRows;
+			// Kopernicus's biome map, a biome index per texel (R8); x = width, y = height, z = biomes, w = 1 to
+			// look them up
+			sampler2D _BiomeMap;
+			float4 _BiomeMapSize;
+			float4 _OrthoCentre;
+			float4 _OrthoEast;
+			float4 _OrthoNorth;
+			float4 _OrthoMeridian;   // the equator under the centre: (cos lon, 0, sin lon)
 
 			// Altimetry / Slope
 			float _TerrainMin;      // LUT domain min (metres)
@@ -192,6 +217,16 @@ Shader "Hidden/SCANsat/VisualComposite"
 				else if (lat < -90.0) { lat = -180.0 - lat; lon += 180.0; }
 				lon = fmod(lon + 3600.0 + 180.0, 360.0) - 180.0;
 				lat = fmod(lat + 1800.0 + 90.0, 180.0) - 90.0;
+			}
+
+			// normalizeRaw for the height pass, without its rounding: adding 3600 before the fmod leaves a float
+			// 1/4096 of a degree, a sizeable share of a deep tile's texel. A coordinate in range is left exactly as
+			// it is, as the CPU's double arithmetic leaves it.
+			void wrapRaw(inout float lon, inout float lat)
+			{
+				if (lat > 90.0) { lat = 180.0 - lat; lon += 180.0; }
+				else if (lat < -90.0) { lat = -180.0 - lat; lon += 180.0; }
+				lon -= 360.0 * floor((lon + 180.0) / 360.0);
 			}
 
 			// Pixel raw coords -> geographic lon/lat (degrees). Returns 0.0 for out-of-disc pixels, else 1.0.
@@ -331,15 +366,17 @@ Shader "Hidden/SCANsat/VisualComposite"
 			// indirection textures name the tile's slot, the window's first; a pixel neither holds reads level
 			// 0's whole-face tile. LOD 0: the level already matches the map's scale (no mips to pick).
 			// Float flags instead of bools, as in unproject.
-			float3 mirageUV(float lon, float lat)
+			// The same from a direction. xTie settles an exact |x| = |z| tie the way the CPU's double-precision
+			// direction does (1: x, 0: z), where float has rounded the difference away; -1: by Mirage's order.
+			float mirageLocateDir(float3 d, float xTie, out float2 slot, out float2 f)
 			{
-				float rlat = lat * DEG2RAD;
-				float rlon = lon * DEG2RAD;
-				float3 d = float3(cos(rlat) * cos(rlon), sin(rlat), cos(rlat) * sin(rlon));
+				slot = float2(0.0, 0.0);
+				f = float2(0.0, 0.0);
 				float3 ad = abs(d);
 
 				// Mirage's tie order: X, then Y, then Z
-				float xMajor = step(ad.y, ad.x) * step(ad.z, ad.x);
+				float xOverZ = (xTie >= 0.0 && ad.x == ad.z) ? xTie : step(ad.z, ad.x);
+				float xMajor = step(ad.y, ad.x) * xOverZ;
 				float yMajor = (1.0 - xMajor) * step(ad.z, ad.y);
 				float zMajor = 1.0 - xMajor - yMajor;
 				float axis = xMajor * (1.0 - step(0.0, d.x)) + yMajor * (3.0 - step(0.0, d.y)) + zMajor * (5.0 - step(0.0, d.z));
@@ -350,11 +387,10 @@ Shader "Hidden/SCANsat/VisualComposite"
 				float2 uv = saturate(float2(dot(d, bu.xyz), dot(d, _MirageV[ai].xyz)) / major * 0.5 + 0.5);
 				float face = bu.w;
 
-				float2 slot, f;
 				if (_MirageDetail > 0.5)
 				{
 					if (mirageSlot(_MirageDetailIndirection, _MirageDetailLevel, face, uv, slot, f) > 0.5)
-						return float3((slot * _MirageTile.w + _MirageTile.z + f * _MirageTile.y) * _MirageDetailAtlas.y, 1.0);
+						return 1.0;
 				}
 
 				if (mirageSlot(_MirageIndirection, _MirageTile.x, face, uv, slot, f) < 0.5)
@@ -363,7 +399,68 @@ Shader "Hidden/SCANsat/VisualComposite"
 					f = uv;
 				}
 
-				return float3((slot * _MirageTile.w + _MirageTile.z + f * _MirageTile.y) * _MirageAtlas.y, 0.0);
+				return 0.0;
+			}
+
+			float mirageLocate(float lon, float lat, out float2 slot, out float2 f)
+			{
+				float rlat = lat * DEG2RAD;
+				float rlon = lon * DEG2RAD;
+				return mirageLocateDir(float3(cos(rlat) * cos(rlon), sin(rlat), cos(rlat) * sin(rlon)), -1.0, slot, f);
+			}
+
+			float3 mirageUV(float lon, float lat)
+			{
+				float2 slot, f;
+				float window = mirageLocate(lon, lat, slot, f);
+				float texel = window > 0.5 ? _MirageDetailAtlas.y : _MirageAtlas.y;
+				return float3((slot * _MirageTile.w + _MirageTile.z + f * _MirageTile.y) * texel, window);
+			}
+
+			// The Mitchell-Netravali cubic with B = C = 1/3 (Mitchell and Netravali, 1988): the weights of four
+			// samples one apart, for a point a fraction t past the second. A tap at distance x < 1 weighs
+			// (7/6)x^3 - 2x^2 + 8/9, one at 1 <= x < 2 weighs -(7/18)x^3 + 2x^2 - (10/3)x + 16/9.
+			float4 mitchellWeights(float t)
+			{
+				float4 x = float4(1.0 + t, t, 1.0 - t, 2.0 - t);
+				float4 near = ((7.0 / 6.0) * x - 2.0) * x * x + 8.0 / 9.0;
+				float4 far = ((-(7.0 / 18.0) * x + 2.0) * x - 10.0 / 3.0) * x + 16.0 / 9.0;
+				return float4(far.x, near.y, near.z, far.w);
+			}
+
+			// A Mirage body's height at a lon/lat, as a fraction of its PQSMod's span, the way Mirage's CPU
+			// sample reads it (SCANmirage.TryGetElevation): 4x4 texels through the Mitchell-Netravali cubic, a
+			// slot's texel i centred on position border + (tile fraction) * tile px = i, every tap clamped to the
+			// slot (its border keeps them inside the tile's neighbourhood). The atlas is point-sampled.
+			float mirageHeight(float3 d, float xTie)
+			{
+				float2 slot, f;
+				float window = mirageLocateDir(d, xTie, slot, f);
+				float texel = window > 0.5 ? _MirageDetailAtlas.y : _MirageAtlas.y;
+				float2 p = _MirageTile.z + f * _MirageTile.y;
+				float2 p0 = floor(p);
+				float4 wx = mitchellWeights(p.x - p0.x);
+				float4 wy = mitchellWeights(p.y - p0.y);
+				float2 origin = slot * _MirageTile.w;
+				float last = _MirageTile.w - 1.0;
+				float h = 0.0;
+				[unroll]
+				for (int j = 0; j < 4; j++)
+				{
+					float y = clamp(p0.y + j - 1.0, 0.0, last);
+					float row = 0.0;
+					[unroll]
+					for (int k = 0; k < 4; k++)
+					{
+						float2 uv = (origin + float2(clamp(p0.x + k - 1.0, 0.0, last), y) + 0.5) * texel;
+						float s = window > 0.5 ? tex2Dlod(_MirageDetailTiles, float4(uv, 0.0, 0.0)).r : tex2Dlod(_MirageTiles, float4(uv, 0.0, 0.0)).r;
+						row += wx[k] * s;
+					}
+
+					h += wy[j] * row;
+				}
+
+				return h;
 			}
 
 			// One layer of a Mirage body at a mirageUV result: the window's atlas or the whole body's
@@ -451,6 +548,18 @@ Shader "Hidden/SCANsat/VisualComposite"
 				uv = geoUVOf(lon, lat);
 				return onMap;
 			}
+
+		ENDCG
+
+		// Pass 0: the map
+		Pass
+		{
+			CGPROGRAM
+			#pragma vertex vert_img
+			#pragma fragment frag
+			// tex2Dgrad / tex2Dlod below: shader model 3.0. Without this Unity assumes 2.5
+			// (D3D11 ps_4_0_level_9_3), which has neither.
+			#pragma target 3.0
 
 			fixed4 frag(v2f_img i) : SV_Target
 			{
@@ -731,6 +840,212 @@ Shader "Hidden/SCANsat/VisualComposite"
 				}
 
 				return col * _OutputAlpha;   // 1 for the windows; the terrain planet overlay fades to 90 percent (lerp toward clear)
+			}
+			ENDCG
+		}
+
+		// Pass 1: a Mirage body's heights for the map, one texel per map pixel, which SCANmap reads back into
+		// its height cache instead of sampling them on the CPU. r: the height in metres as
+		// SCANUtil.getElevation gives it (rounded to 0.1 m), a true 0 m as -0.001 since 0 means unsampled;
+		// g: 1 where Altimetry is scanned, 0 where not, -1 off the map; b: the biome as
+		// SCANUtil.getBiomeIndexFraction gives it, when _BiomeMapSize.w is set. A pixel's coordinate is the CPU
+		// cache's: the raw grid itself for a geographic cache (the big map), unprojected for a pixel-space
+		// one, at the pixel's index rather than its centre.
+		Pass
+		{
+			CGPROGRAM
+			#pragma vertex vert_img
+			#pragma fragment fragHeights
+			#pragma target 3.0
+
+			float biomeTexel(float x, float y)
+			{
+				return floor(tex2Dlod(_BiomeMap, float4((x + 0.5) / _BiomeMapSize.x, (y + 0.5) / _BiomeMapSize.y, 0.0, 0.0)).r * 255.0 + 0.5);
+			}
+
+			// The biome at a point of the biome map, in texels, the way Kopernicus's GetAtt picks it: the four
+			// texels' biome indices, and where they differ the one nearest their bilinear blend (the first in
+			// (min, min), (max, min), (min, max), (max, max) order on a tie). As a fraction of the biome count.
+			float biomeAt(float cx, float cy)
+			{
+				float minX = floor(cx);
+				float minY = floor(cy);
+				float midX = cx - minX;
+				float midY = cy - minY;
+				float maxX = minX + 1.0 >= _BiomeMapSize.x ? 0.0 : minX + 1.0;
+				float maxY = min(minY + 1.0, _BiomeMapSize.y - 1.0);
+				float b1 = biomeTexel(minX, minY);
+				float b2 = biomeTexel(maxX, minY);
+				float b3 = biomeTexel(minX, maxY);
+				float b4 = biomeTexel(maxX, maxY);
+				float b = b1;
+				if (!(b1 == b2 && b1 == b3 && b1 == b4))
+				{
+					float rowA = b1 + (b2 - b1) * midX;
+					float rowB = b3 + (b4 - b3) * midX;
+					float blend = rowA + (rowB - rowA) * midY;
+					float best = (b1 - blend) * (b1 - blend);
+					float d2 = (b2 - blend) * (b2 - blend);
+					if (d2 < best) { best = d2; b = b2; }
+					d2 = (b3 - blend) * (b3 - blend);
+					if (d2 < best) { best = d2; b = b3; }
+					d2 = (b4 - blend) * (b4 - blend);
+					if (d2 < best) { b = b4; }
+				}
+
+				return b / _BiomeMapSize.z;
+			}
+
+			// A lon/lat in degrees to biome map texels, as GetAtt and GetBilinearCoordinates make them
+			// (in degrees, which loses less than radians would: the turn from 90 E, then the map's x)
+			float2 biomeCoords(float lon, float lat)
+			{
+				float turn = (lon - 90.0) / 360.0;
+				turn -= floor(turn);
+				float x = 1.0 - turn;
+				x = abs(x - floor(x));
+				float y = lat / 180.0 + 0.5;
+				y = y >= 1.0 ? 0.99999994 : max(y, 0.0);
+				return float2(x * _BiomeMapSize.x, y * _BiomeMapSize.y);
+			}
+
+			float4 fragHeights(v2f_img i) : SV_Target
+			{
+				float4 column = tex2Dlod(_HeightColumns, float4(i.uv.x, 0.25, 0.0, 0.0));
+				float4 row = tex2Dlod(_HeightRows, float4(i.uv.y, 0.25, 0.0, 0.0));
+				float2 biomeAtTables = float2(-1.0, -1.0);
+				float rawLon = column.b;
+				float rawLat = row.b;
+				float lon = rawLon;
+				float lat = rawLat;
+				float3 d;
+				float xTie = -1.0;
+				if (_PixelSpace > 0.5 && _Projection > 2.5)
+				{
+					// Orthographic: the plane point (in units of 1.5 radians) straight to its direction
+					wrapRaw(rawLon, rawLat);
+					float x = rawLon * DEG2RAD / 1.5;
+					float y = rawLat * DEG2RAD / 1.5;
+					float rho2 = x * x + y * y;
+					if (!(rho2 <= 1.0))
+						return float4(0.0, -1.0, 0.0, 0.0);
+					d = sqrt(1.0 - rho2) * _OrthoCentre.xyz + x * _OrthoEast.xyz + y * _OrthoNorth.xyz;
+					// Its longitude as an angle from the centre's, small, so atan2 keeps it to float precision
+					// (the biome map's borders need it), and its latitude against the distance from the axis
+					float along = dot(d, _OrthoMeridian.xyz);
+					float east = dot(d, _OrthoEast.xyz);
+					lon = _CenteredLon + atan2(east, along) * RAD2DEG;
+					lat = atan2(d.y, sqrt(along * along + east * east)) * RAD2DEG;
+					if (lon >= 180.0)
+						lon -= 360.0;
+					else if (lon < -180.0)
+						lon += 360.0;
+				}
+				else if (_PixelSpace > 0.5 && _Projection > 0.5)
+				{
+					// The other window projections, not drawn by any window today: the general (coarser) way
+					if (unproject(column.b, row.b, lon, lat) < 0.5)
+						return float4(0.0, -1.0, 0.0, 0.0);
+					float rlat = lat * DEG2RAD;
+					float rlon = lon * DEG2RAD;
+					d = float3(cos(rlat) * cos(rlon), sin(rlat), cos(rlat) * sin(rlon));
+				}
+				else
+				{
+					// Rectangular, or the geographic grid: raw angles straight from the tables. Past a pole the raw
+					// direction is the right one as it stands; only the coverage cell needs them normalised.
+					d = float3(row.r * column.r, row.g, row.r * column.g);
+					xTie = column.a;
+					wrapRaw(lon, lat);
+					float4 columnBiome = tex2Dlod(_HeightColumns, float4(i.uv.x, 0.75, 0.0, 0.0));
+					float4 rowBiome = tex2Dlod(_HeightRows, float4(i.uv.y, 0.75, 0.0, 0.0));
+					biomeAtTables = float2(rowBiome.g > 0.5 ? fmod(columnBiome.r + _BiomeMapSize.x * 0.5, _BiomeMapSize.x) : columnBiome.r, rowBiome.r);
+				}
+
+				float ilon = fmod(floor(lon + 540.0), 360.0);
+				float ilat = fmod(floor(lat + 270.0), 180.0);
+				float cov = decodeCoverage(float2((ilon + 0.5) / 360.0, (ilat + 0.5) / 180.0));
+				float scanned = (covHas(cov, 0.0) || covHas(cov, 1.0)) ? 1.0 : 0.0;
+
+				float m = round((_MirageHeightOffset + _MirageHeightScale * mirageHeight(d, xTie)) * 10.0) * 0.1;
+				if (m == 0.0)
+					m = -0.001;
+
+				float biome = 0.0;
+				if (_BiomeMapSize.w > 0.5)
+				{
+					float2 c = biomeAtTables.x >= 0.0 ? biomeAtTables : biomeCoords(lon, lat);
+					biome = biomeAt(c.x, c.y);
+				}
+
+				return float4(m, scanned, biome, 0.0);
+			}
+			ENDCG
+		}
+
+		// Pass 2: night lights over a Mirage body's Visual map, added after pass 0 (SCANmap.composite) while the
+		// terminator is on: its emissive tiles where Visual is scanned, at the detail pass 0 draws that coverage
+		// with, tinted and lit as the body's own material has them. At night they fade in over civil twilight, the
+		// sun 0 to 6 degrees below the horizon, inside the terminator pass 0 darkens. A pass of its own, so its
+		// few samplers do not count against pass 0's 16.
+		Pass
+		{
+			Blend One One
+
+			CGPROGRAM
+			#pragma vertex vert_img
+			#pragma fragment fragLights
+			#pragma target 3.0
+
+			fixed4 fragLights(v2f_img i) : SV_Target
+			{
+				// Rows pass 0 has not revealed yet, its redline, and RPM's reserved rows stay as they are
+				if (_SweepY < 1.0 && i.uv.y > _SweepY - _SweepBand / _MapHeight)
+					discard;
+
+				float2 pix = floor(i.uv * float2(_MapWidth, _MapHeight));
+				if (pix.y < _RowMin || pix.y > _RowMax)
+					discard;
+
+				float lon, lat;
+				if (unproject(rawLonAt(i.uv.x), rawLatAt(i.uv.y), lon, lat) < 0.5)
+					discard;
+
+				float rlat = lat * DEG2RAD;
+				float rlon = lon * DEG2RAD;
+				float sunSin = dot(float3(cos(rlat) * cos(rlon), sin(rlat), cos(rlat) * sin(rlon)), _SunDir.xyz);   // sine of the sun's elevation
+				float light = 1.0;
+				if (_EmissiveLightMode < -0.5)
+					light = saturate(-sunSin / 0.104528);   // sin 6 degrees
+				else if (_EmissiveLightMode > 0.5)
+					light = saturate(sunSin / 0.104528);
+				if (light <= 0.0)
+					discard;
+
+				// Visual's coverage, as pass 0 reads it: HiRes at full detail, LoRes in its 512 x 256 blocks
+				float ilon = fmod(floor(lon + 540.0), 360.0);
+				float ilat = fmod(floor(lat + 270.0), 180.0);
+				float cov = decodeCoverage(float2((ilon + 0.5) / 360.0, (ilat + 0.5) / 180.0));
+				float3 mUV = float3(0.0, 0.0, 0.0);
+				if (covHas(cov, 6.0))
+					mUV = mirageUV(lon, lat);
+				else if (covHas(cov, 2.0))
+				{
+					float fLat = saturate((lat + 90.0) / 180.0);
+					float fLon = (lon + 270.0) / 360.0;
+					if (fLon < 0.0) fLon += 1.0;
+					if (fLon > 1.0) fLon -= 1.0;
+					fLon = saturate(1.0 - fLon);
+					float2 q = float2(floor(fLon * 512.0) / 512.0, floor(fLat * 256.0) / 256.0);
+					mUV = mirageUV((1.0 - q.x) * 360.0 - 270.0, q.y * 180.0 - 90.0);
+				}
+				else
+					discard;
+
+				float3 rgb = mirageSample(_MirageDetailEmissive, _MirageEmissive, mUV).r * light * _EmissiveColor.rgb;
+				if (_ColorMode <= 0.5)
+					rgb = grayscale(rgb);
+				return fixed4(rgb, 0.0);
 			}
 			ENDCG
 		}

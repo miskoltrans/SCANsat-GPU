@@ -47,6 +47,8 @@ namespace SCANsat.SCAN_Unity
 		private SCANdata data;
 		private Vessel vessel;
 		private bool updateMap;
+		private bool legendStale;   // a pass ran since the legend was drawn: the biome legend lists what the finished pass shows
+		private List<CBAttributeMapSO.MapAttribute> biomes = new List<CBAttributeMapSO.MapAttribute>();
 		private StringBuilder infoString = new StringBuilder();
 		private System.Random gen;
 		private bool _inputLock;
@@ -611,6 +613,16 @@ namespace SCANsat.SCAN_Unity
 			if (!bigmap.isMapComplete())
 			{
 				bigmap.getPartialMap();   // one call per frame; the map generation budget caps what it spends
+				legendStale = true;
+			}
+			else if (legendStale)
+			{
+				legendStale = false;
+
+				if (bigmap.MType == mapType.Biome)
+				{
+					uiElement.SetLegends(LegendToggle);
+				}
 			}
 
 			if (OrbitToggle && ShowOrbit)
@@ -1805,7 +1817,12 @@ namespace SCANsat.SCAN_Unity
 					case mapType.Biome:
 						if (body != null && body.BiomeMap != null && body.BiomeMap.Attributes != null)
 						{
-							return bigmap.MapLegend.getLegend(data, SCANcontroller.controller.bigMapColor, SCAN_Settings_Config.Instance.BigMapStockBiomes, SCANUtil.GetOrBuildPalette(body));
+							// Only the biomes the map shows - those of its scanned pixels, so an unscanned body gives
+							// none away. None until the body's first Biome pass has built rows (the previous legend
+							// may be another mode's); the pass's end draws it again.
+							biomes = bigmap.BiomesInView() ?? new List<CBAttributeMapSO.MapAttribute>();
+
+							return bigmap.MapLegend.getLegend(data, SCANcontroller.controller.bigMapColor, SCAN_Settings_Config.Instance.BigMapStockBiomes, biomes.ToArray());
 						}
 						else
 						{
@@ -2452,13 +2469,18 @@ namespace SCANsat.SCAN_Unity
 						return "";
 					}
 
-					int count = body.BiomeMap.Attributes.Length;
+					int count = biomes.Count;
+
+					if (count == 0)
+					{
+						return "";
+					}
 
 					// Same block boundaries the legend texture is drawn with (256 / count texels each);
 					// the old truncated block size drifted off by one towards the right end.
 					int current = Mathf.Clamp((int)(xPos * count), 0, count - 1);
 
-					return Localizer.Format(body.BiomeMap.Attributes[current].displayname);
+					return Localizer.Format(biomes[current].displayname);
 				case mapType.Altimetry:
 					float terrain = xPos * SCANUtil.getTerrainConfig(data).TerrainRange + SCANUtil.getTerrainConfig(data).MinTerrain;
 

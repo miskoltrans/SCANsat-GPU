@@ -304,6 +304,21 @@ namespace SCANsat
 				return true;
 			}
 
+			// A body on Parallax's scaled shader: Parallax unloads an off-screen body's textures as soon as it
+			// looks, so what getScaledSpaceSource loads for us is gone by the next composite, and each one
+			// loaded them again - ~200 ms a frame through a map's whole reveal. The copy made on the first
+			// load stands in from then on.
+			if (parallaxCopies.TryGetValue(b, out ParallaxCopy copy) && copy.color != null)
+			{
+				parallaxCopyOrder.Remove(b);
+				parallaxCopyOrder.Add(b);
+				colorTex = copy.color;
+				normalTex = copy.normal;
+				normalYChannel = copy.normalYChannel;
+				return true;
+			}
+
+			bool parallax = usesParallaxScaled(b);
 			if (!getScaledSpaceSource(b, out colorTex, out normalTex, out _, out gasRamp))
 			{
 				// A cfg body whose colour map would not load: OnDemand was told to skip it back in
@@ -320,7 +335,100 @@ namespace SCANsat
 
 			Texture2D n2d = normalTex as Texture2D;
 			normalYChannel = n2d != null ? SCANtextures.NormalYChannelFor(n2d.format) : 0;
+
+			if (parallax && gasRamp == null)
+			{
+				keepParallaxCopy(b, ref colorTex, ref normalTex, normalYChannel);
+			}
+
 			return true;
+		}
+
+		// GPU copies of Parallax-loaded Visual textures (see getVisualSource): exact, in their own compressed
+		// format, about 22 MB a body for Sol's 4k textures. A few bodies, least recently drawn freed first, and
+		// all of them with the scene.
+		private sealed class ParallaxCopy
+		{
+			internal Texture2D color, normal;
+			internal int normalYChannel;
+		}
+
+		private const int MaxParallaxCopies = 3;
+		private readonly Dictionary<CelestialBody, ParallaxCopy> parallaxCopies = new Dictionary<CelestialBody, ParallaxCopy>();
+		private readonly List<CelestialBody> parallaxCopyOrder = new List<CelestialBody>();
+
+		private static bool usesParallaxScaled(CelestialBody b)
+		{
+			MeshRenderer scaledMesh = b.scaledBody != null ? b.scaledBody.GetComponent<MeshRenderer>() : null;
+			Material material = scaledMesh != null ? scaledMesh.sharedMaterial : null;
+			string shaderName = material != null && material.shader != null ? material.shader.name : "";
+			// The same test GetVisualMapTexturesForBody makes before it asks Parallax to load the body
+			return shaderName.Contains("ParallaxScaled") || shaderName.Contains("HapkeScaled");
+		}
+
+		// Copy what Parallax loaded and hand the copies back in its place. A texture this device cannot copy
+		// is handed back as it is, and loaded again next time, as before.
+		private void keepParallaxCopy(CelestialBody b, ref Texture colorTex, ref Texture normalTex, int normalYChannel)
+		{
+			Texture2D color = gpuCopy(colorTex as Texture2D);
+			if (color == null)
+			{
+				return;
+			}
+
+			// A normal map that will not copy leaves both as they are: a copy without it would draw the map shaded
+			// this once and unshaded from then on
+			Texture2D normal = gpuCopy(normalTex as Texture2D);
+			if (normalTex != null && normal == null)
+			{
+				Destroy(color);
+				return;
+			}
+
+			parallaxCopies[b] = new ParallaxCopy { color = color, normal = normal, normalYChannel = normalYChannel };
+			parallaxCopyOrder.Remove(b);
+			parallaxCopyOrder.Add(b);
+			while (parallaxCopyOrder.Count > MaxParallaxCopies)
+			{
+				releaseParallaxCopy(parallaxCopyOrder[0]);
+			}
+
+			colorTex = color;
+			normalTex = normal;
+		}
+
+		// An exact copy on the GPU, every mip, nothing on the CPU; null when this device cannot copy it
+		private static Texture2D gpuCopy(Texture2D src)
+		{
+			if (src == null || (SystemInfo.copyTextureSupport & UnityEngine.Rendering.CopyTextureSupport.Basic) == 0)
+			{
+				return null;
+			}
+
+			Texture2D copy = new Texture2D(src.width, src.height, src.format, src.mipmapCount,
+				!UnityEngine.Experimental.Rendering.GraphicsFormatUtility.IsSRGBFormat(src.graphicsFormat))
+			{
+				name = "SCANsat copy of " + src.name,
+				filterMode = src.filterMode,
+				wrapModeU = src.wrapModeU,
+				wrapModeV = src.wrapModeV,
+				anisoLevel = src.anisoLevel,
+			};
+			copy.Apply(false, true);
+			Graphics.CopyTexture(src, copy);
+			return copy;
+		}
+
+		private void releaseParallaxCopy(CelestialBody b)
+		{
+			if (parallaxCopies.TryGetValue(b, out ParallaxCopy copy))
+			{
+				if (copy.color != null) { Destroy(copy.color); }
+				if (copy.normal != null) { Destroy(copy.normal); }
+				parallaxCopies.Remove(b);
+			}
+
+			parallaxCopyOrder.Remove(b);
 		}
 
 		/// <summary>
@@ -1141,7 +1249,7 @@ namespace SCANsat
 
 		/// <summary>
 		/// One frame's worth of a body's height map build, under the per-frame CPU budget the GPU map
-		/// builds share (SCANmap.claimBuildBudget): at least one row, then as many more as fit. The old
+		/// builds share (SCANmap.claimBuildBudget): at least one step, then as many more as fit. The old
 		/// one-row-per-call cadence made this frame-rate bound rather than CPU bound - the 64,800 PQS
 		/// samples are only about 80 ms of work, but they took 4.5 s on the Moon (RSS) and around ten
 		/// in a heavier scene, ~98% of it spent waiting for the next frame. Whoever owns the build (here,
@@ -1156,9 +1264,11 @@ namespace SCANsat
 
 			while (true)
 			{
-				d.generateHeightMap(360);
+				// 20 of a row's 360 samples a step (it must divide 360), the least a frame does: small
+				// enough that a slow PQS body cannot make a long frame of it
+				d.generateHeightMap(20);
 
-				// Every call either finishes the map or advances a row, so this always terminates.
+				// Every call either finishes the map or advances the row, so this always terminates.
 				if (d.Built || System.Diagnostics.Stopwatch.GetTimestamp() - start >= budget)
 				{
 					break;
@@ -1296,7 +1406,13 @@ namespace SCANsat
 				t.Release();
 			}
 			mapTextureHandler.Clear();
+			while (parallaxCopyOrder.Count > 0)
+			{
+				releaseParallaxCopy(parallaxCopyOrder[0]);
+			}
+
 			SCANmirageAtlas.ReleaseAll();
+			SCANmap.ReleaseBiomeTextures();
 			SCANmirage.ReleaseAll();
 		}
 
