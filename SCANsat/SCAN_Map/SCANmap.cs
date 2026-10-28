@@ -1078,6 +1078,17 @@ namespace SCANsat.SCAN_Map
 			rangeRow = -1;
 			rowCol = 0;
 			gpuHeights = GpuHeights.Off;
+			// An auto-range map on a body with no terrain to fit (the Sun, a gas giant) never runs the pre-pass, and
+			// the empty range it starts with divided by zero in the palette, every frame: it takes the body's
+			// configured range instead, the one its legend already shows
+			if (profile.AutoRange && !pqs)
+			{
+				SCANterrainConfig tc = SCANUtil.getTerrainConfig(data);
+				customMin = tc.MinTerrain;
+				customMax = Math.Max(tc.MaxTerrain, tc.MinTerrain + 1f);
+				customRange = customMax - customMin;
+			}
+
 			noiseSeed = UnityEngine.Random.value;
 			passHeightSamples = 0;
 			passBiomeSamples = 0;
