@@ -112,6 +112,11 @@ namespace SCANsat.SCAN_Map
 			legendScheme = color;
 			stockScheme = stock;
 
+			// The gradient and greyscale colour a biome by its index in the body, as the map does: the zoom
+			// legend lists only some of the body's biomes
+			CBAttributeMapSO.MapAttribute[] atts = body.BiomeMap != null ? body.BiomeMap.Attributes : null;
+			int bodyCount = atts != null && atts.Length > 0 ? atts.Length : biomes.Length;
+
 			Color32[] pix = new Color32[256];
 
 			int count = biomes.Length;
@@ -119,6 +124,9 @@ namespace SCANsat.SCAN_Map
 			{
 				int start = (int)Math.Round(biome_idx * 256 / (count * 1d));
 				int end = (int)Math.Round((biome_idx + 1) * 256 / (count * 1d));
+
+				int bodyIdx = atts != null ? Array.FindIndex(atts, a => a.name == biomes[biome_idx].name) : -1;
+				float t = (bodyIdx >= 0 ? bodyIdx : biome_idx) / (bodyCount * 1f);
 
 				for (int i = start; i < end; i++)
 				{
@@ -128,11 +136,11 @@ namespace SCANsat.SCAN_Map
 					}
 					else if (color)
 					{
-						pix[i] = palette.lerp(SCANcontroller.controller.lowBiomeColor32, SCANcontroller.controller.highBiomeColor32, (float)((biome_idx * 1f) / (count * 1f)));
+						pix[i] = palette.lerp(SCANcontroller.controller.lowBiomeColor32, SCANcontroller.controller.highBiomeColor32, t);
 					}
 					else
 					{
-						pix[i] = palette.lerp(palette.Black, palette.White, (float)(biome_idx * 1f) / (count * 1f));
+						pix[i] = palette.lerp(palette.Black, palette.White, t);
 					}
 				}
 			}

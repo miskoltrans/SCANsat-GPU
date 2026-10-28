@@ -2319,11 +2319,13 @@ namespace SCANsat.SCAN_Map
 			customResourceMax = max;
 		}
 
-		// The biomes present in this map's window, read from the biome index cache once rows are
-		// built (the zoom map's legend lists them). Null until any row is cached.
+		// The biomes this window map shows, in the body's order: those of its biome-scanned pixels, read from
+		// the biome index cache once rows are built (the zoom map's legend lists them). The cache holds every
+		// pixel's biome, scanned or not - the shader masks the unscanned - so coverage is tested here. Null
+		// until any row is cached.
 		internal List<CBAttributeMapSO.MapAttribute> BiomesInView()
 		{
-			if (body == null || body.BiomeMap == null || biome_indexmap == null || biomeRowCached == null)
+			if (body == null || body.BiomeMap == null || biome_indexmap == null || biomeRowCached == null || data == null)
 			{
 				return null;
 			}
@@ -2331,7 +2333,6 @@ namespace SCANsat.SCAN_Map
 			CBAttributeMapSO.MapAttribute[] atts = body.BiomeMap.Attributes;
 			CBAttributeMapSO.MapAttribute[] pal = SCANUtil.GetOrBuildPalette(body);
 			bool[] seen = new bool[atts.Length];
-			List<CBAttributeMapSO.MapAttribute> list = new List<CBAttributeMapSO.MapAttribute>();
 			bool anyRow = false;
 
 			for (int y = 0; y < mapheight && y < biomeRowCached.Length; y++)
@@ -2352,12 +2353,28 @@ namespace SCANsat.SCAN_Map
 						continue;
 					}
 
-					seen[idx] = true;
+					if (pixelLonLat(x, y, out double lon, out double lat) && SCANUtil.isCovered(lon, lat, data, SCANtype.Biome))
+					{
+						seen[idx] = true;
+					}
+				}
+			}
+
+			if (!anyRow)
+			{
+				return null;
+			}
+
+			List<CBAttributeMapSO.MapAttribute> list = new List<CBAttributeMapSO.MapAttribute>();
+			for (int idx = 0; idx < atts.Length; idx++)
+			{
+				if (seen[idx])
+				{
 					list.Add(pal != null && idx < pal.Length && pal[idx] != null ? pal[idx] : atts[idx]);
 				}
 			}
 
-			return anyRow ? list : null;
+			return list;
 		}
 
 		// Composite this map once more at w x h into a fresh RenderTexture (the caller releases it). The
