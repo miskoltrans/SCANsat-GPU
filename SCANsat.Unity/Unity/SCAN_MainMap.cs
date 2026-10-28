@@ -388,6 +388,28 @@ namespace SCANsat.Unity.Unity
 		public void OnPointerDown(PointerEventData eventData)
 		{
 			transform.SetAsLastSibling();
+
+			// A right click on the map opens the zoom map there, as on the big map; a left drag moves the window
+			if (eventData.button != PointerEventData.InputButton.Right || m_MainMap == null || mapInterface == null)
+			{
+				return;
+			}
+
+			RectTransform r = m_MainMap.rectTransform;
+
+			if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(r, eventData.position, eventData.pressEventCamera, out Vector2 local))
+			{
+				return;
+			}
+
+			Vector2 p = new Vector2((local.x - r.rect.xMin) / r.rect.width, (local.y - r.rect.yMin) / r.rect.height);
+
+			if (p.x < 0 || p.x > 1 || p.y < 0 || p.y > 1)
+			{
+				return;
+			}
+
+			mapInterface.ClickMap(p);
 		}
 
 		public void OnBeginDrag(PointerEventData eventData)

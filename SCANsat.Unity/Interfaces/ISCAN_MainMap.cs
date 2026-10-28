@@ -60,6 +60,8 @@ namespace SCANsat.Unity.Interfaces
 
 		void OpenZoomMap();
 
+		void ClickMap(Vector2 position);
+
 		void OpenSettings();
 
 		void OpenOverlay();
