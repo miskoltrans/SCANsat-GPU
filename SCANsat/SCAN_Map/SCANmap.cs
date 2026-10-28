@@ -1424,15 +1424,16 @@ namespace SCANsat.SCAN_Map
 			}
 		}
 
-		// A Mirage body's Visual map draws from the body's own colour tiles (SCANmirageAtlas): Mirage bodies
-		// ship no equirect colour map, and their ScaledSpace is Mirage's too. Binds them for a map needing
-		// targetWidth pixels across 360 degrees; false for any other body or mode. loading: some tiles are
-		// still to land. shaded: its normals are bound too. lights: its night lights. wait: block until they
-		// have (a one-off render).
+		// A Visual map of a body Mirage has colour tiles for draws from them (SCANmirageAtlas): such bodies
+		// ship no equirect colour map, and their ScaledSpace is Mirage's too. That takes in Jupiter and Saturn,
+		// which have tiles but no Mirage terrain (IsMirageBody, heights): their scaled material's _MainTex is
+		// not their colour. Binds them for a map needing targetWidth pixels across 360 degrees; false for any
+		// other body or mode. loading: some tiles are still to land. shaded: its normals are bound too. lights:
+		// its night lights. wait: block until they have (a one-off render).
 		private bool bindMirage(int targetWidth, bool wait, out bool shaded, out bool lights, out bool loading)
 		{
 			shaded = lights = loading = false;
-			bool bound = mType == mapType.Visual && SCANmirage.IsMirageBody(body)
+			bool bound = mType == mapType.Visual
 				&& SCANmirageAtlas.Bind(compositeMaterial, body, targetWidth, mirageWindowFor(), wait, out shaded, out lights, out loading);
 			compositeMaterial.SetFloat("_MirageColor", bound ? 1f : 0f);
 			return bound;
