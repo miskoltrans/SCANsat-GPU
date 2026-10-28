@@ -1593,7 +1593,7 @@ namespace SCANsat.SCAN_Map
 			if (sweepStart < 0f)
 			{
 				sweepStart = now;
-				sweepDuration = configuredSweepDuration();
+				sweepDuration = profile.TimedSweep ? configuredSweepDuration() : 0f;
 			}
 
 			if (sweepDuration <= 0f)

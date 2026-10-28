@@ -47,6 +47,11 @@ namespace SCANsat.SCAN_Map
 		/// mid-build (the planet overlay hands its texture over once).</summary>
 		internal bool Sweep { get; private set; }
 
+		/// <summary>true: the reveal also takes the scanline setting's time (one second at 1x), the
+		/// scanning effect; false: the line shows only how far the build has got, so a map whose data is
+		/// ready appears at once.</summary>
+		internal bool TimedSweep { get; private set; }
+
 		/// <summary>false: Biome samples no elevation for its underlay, and the shader keeps it grey.</summary>
 		internal bool BiomeUnderlay { get; private set; }
 
@@ -92,6 +97,7 @@ namespace SCANsat.SCAN_Map
 					{
 						GeographicCache = true,
 						Sweep = true,
+						TimedSweep = true,
 						BiomeUnderlay = true,
 						PlanetUV = false,
 						AutoRange = false,
@@ -108,6 +114,7 @@ namespace SCANsat.SCAN_Map
 					{
 						GeographicCache = false,
 						Sweep = true,
+						TimedSweep = false,   // the zoom map is for panning and zooming: it shows its data as soon as it has it
 						BiomeUnderlay = true,
 						PlanetUV = false,
 						AutoRange = true,
@@ -124,6 +131,7 @@ namespace SCANsat.SCAN_Map
 					{
 						GeographicCache = false,
 						Sweep = true,
+						TimedSweep = true,
 						BiomeUnderlay = true,
 						PlanetUV = false,
 						AutoRange = true,
@@ -140,6 +148,7 @@ namespace SCANsat.SCAN_Map
 					{
 						GeographicCache = false,
 						Sweep = true,
+						TimedSweep = true,
 						BiomeUnderlay = false,   // its biome transparency is 0, so an underlay would be sampled and never seen
 						PlanetUV = false,
 						AutoRange = false,
@@ -156,6 +165,7 @@ namespace SCANsat.SCAN_Map
 					{
 						GeographicCache = true,
 						Sweep = false,
+						TimedSweep = false,
 						BiomeUnderlay = false,
 						PlanetUV = true,
 						AutoRange = false,
