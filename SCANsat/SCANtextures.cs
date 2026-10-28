@@ -65,6 +65,9 @@ namespace SCANsat
 
 		private static HashSet<string> configuredBodies;
 		private static readonly HashSet<string> failedColorBodies = new HashSet<string>();
+		// Declared paths found missing: a body's paths are resolved again each time one of its Visual maps opens, so
+		// the warning is given once a session (Sol's Mirage build ships no maps for 22 bodies, by design)
+		private static readonly HashSet<string> missingPaths = new HashSet<string>();
 
 		public bool HasConfig
 		{
@@ -205,7 +208,10 @@ namespace SCANsat
 			{
 				return path;
 			}
-			SCANUtil.SCANlog($"[WARNING] SCANSAT_BODY_TEXTURES path \"GameData/{cfgPath}\" does not exist.");
+			if (missingPaths.Add(path))
+			{
+				SCANUtil.SCANlog($"[WARNING] SCANSAT_BODY_TEXTURES path \"GameData/{cfgPath}\" does not exist.");
+			}
 			return null;
 		}
 
