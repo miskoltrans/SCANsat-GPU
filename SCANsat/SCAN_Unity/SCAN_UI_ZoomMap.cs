@@ -42,6 +42,10 @@ namespace SCANsat.SCAN_Unity
 		private Vessel vessel;
 		private bool updateMap;
 		private bool rebuilding;
+		private float passStart, lastPassEnd, lastPassSeconds;   // the window's passes, for following the vessel
+
+		// Locked to the vessel, the map follows it this often (real seconds), or once a pass if a pass takes longer
+		private const float FollowInterval = 1f;
 		private bool narrowBand;
 		private StringBuilder infoString = new StringBuilder();
 		private System.Random gen;
@@ -369,6 +373,7 @@ namespace SCANsat.SCAN_Unity
 			spotmap.Terminator = SCANcontroller.controller.zoomMapTerminator;
 
 			rebuilding = true;
+			passStart = Time.realtimeSinceStartup;
 
 			spotmap.resetMap(t, ResourceToggle, narrowBand);
 		}
@@ -404,6 +409,7 @@ namespace SCANsat.SCAN_Unity
 			}
 
 			rebuilding = true;
+			passStart = Time.realtimeSinceStartup;
 
 			spotmap.resetMap(ResourceToggle, narrowBand);
 
@@ -635,9 +641,16 @@ namespace SCANsat.SCAN_Unity
 			else if (rebuilding)
 			{
 				rebuilding = false;
+				lastPassEnd = Time.realtimeSinceStartup;
+				lastPassSeconds = lastPassEnd - passStart;
 
 				uiElement.ResetRefresh();
 				uiElement.SetLegends(LegendToggle);   // the palette range and the biome list come from the finished pass
+			}
+
+			if (VesselLock && !rebuilding && HighLogic.LoadedSceneIsFlight)
+			{
+				followVessel();
 			}
 
 			if (OrbitToggle && ShowOrbit)
@@ -655,6 +668,33 @@ namespace SCANsat.SCAN_Unity
 				updateMap = false;
 				uiElement.UpdateMapTexture(spotmap.DisplayTexture);
 			}
+		}
+
+		// Locked to the vessel, the map re-centres on it once it has moved a map pixel: every FollowInterval,
+		// or after as long again as the last pass took, so a body whose maps build slowly (PQS terrain, not
+		// Mirage) is building at most half the time. The auto-refresh timer still re-centres too.
+		private void followVessel()
+		{
+			Vessel v = FlightGlobals.ActiveVessel;
+
+			if (v == null || Time.realtimeSinceStartup - lastPassEnd < Mathf.Max(FollowInterval, lastPassSeconds))
+			{
+				return;
+			}
+
+			if (v.mainBody == body)
+			{
+				double lat = SCANUtil.fixLatShift(v.latitude);
+				double dLon = SCANUtil.fixLonShift(SCANUtil.fixLonShift(v.longitude) - spotmap.CenteredLong) * Math.Cos(lat * Mathf.Deg2Rad);
+				double dLat = lat - spotmap.CenteredLat;
+
+				if (Math.Sqrt(dLon * dLon + dLat * dLat) * spotmap.MapScale < 1)
+				{
+					return;
+				}
+			}
+
+			resetMapToVessel();
 		}
 
 		private void UpdateOrbitIcons(Orbit o)
