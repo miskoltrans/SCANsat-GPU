@@ -51,6 +51,10 @@ Shader "Hidden/SCANsat/VisualComposite"
 		_MirageDetailTiles ("Mirage Window Colour Tiles", 2D) = "gray" {}
 		_MirageDetailNormals ("Mirage Window Normal Tiles", 2D) = "gray" {}
 		_MirageDetailIndirection ("Mirage Window Tile Slots", 2D) = "black" {}
+		_MirageEmissive ("Mirage Night Light Tiles", 2D) = "black" {}
+		_MirageDetailEmissive ("Mirage Window Night Light Tiles", 2D) = "black" {}
+		_EmissiveColor ("Night Light Tint", Color) = (1,1,1,1)
+		_EmissiveLightMode ("Night Light Mode (-1 night, 0 always, 1 day)", Float) = -1
 		_HasElevation ("Has Elevation", Float) = 1
 		_OutputAlpha ("Output Alpha", Float) = 1
 		_ResGreyBlend ("Resource Below-Range Or Empty Grey Blend", Float) = 0.3
@@ -112,6 +116,13 @@ Shader "Hidden/SCANsat/VisualComposite"
 			sampler2D _MirageDetailIndirection;
 			float _MirageDetailLevel;            // tiles per face edge at the window's level
 			float4 _MirageDetailAtlas;           // x = slots per atlas row, y = 1 / atlas px
+			// Night lights (pass 2): Mirage's emissive tiles in the colour tiles' slots, one channel (BC4), tinted and
+			// lit as the body's own material has them - _EmissiveLightMode -1 at night, 0 always, 1 by day
+			sampler2D _MirageEmissive;
+			sampler2D _MirageDetailEmissive;
+			float4 _EmissiveColor;
+			float _EmissiveLightMode;
+			float4 _SunDir;   // the subsolar point as a direction, the way mirageLocate makes one from a lon/lat
 			// The height pass binds a body's height atlases to the same names; a tile holds fractions of the
 			// PQSMod's span: offset + scale * h metres
 			float _MirageHeightScale;
@@ -968,6 +979,73 @@ Shader "Hidden/SCANsat/VisualComposite"
 				}
 
 				return float4(m, scanned, biome, 0.0);
+			}
+			ENDCG
+		}
+
+		// Pass 2: night lights over a Mirage body's Visual map, added after pass 0 (SCANmap.composite) while the
+		// terminator is on: its emissive tiles where Visual is scanned, at the detail pass 0 draws that coverage
+		// with, tinted and lit as the body's own material has them. At night they fade in over civil twilight, the
+		// sun 0 to 6 degrees below the horizon, inside the terminator pass 0 darkens. A pass of its own, so its
+		// few samplers do not count against pass 0's 16.
+		Pass
+		{
+			Blend One One
+
+			CGPROGRAM
+			#pragma vertex vert_img
+			#pragma fragment fragLights
+			#pragma target 3.0
+
+			fixed4 fragLights(v2f_img i) : SV_Target
+			{
+				// Rows pass 0 has not revealed yet, its redline, and RPM's reserved rows stay as they are
+				if (_SweepY < 1.0 && i.uv.y > _SweepY - _SweepBand / _MapHeight)
+					discard;
+
+				float2 pix = floor(i.uv * float2(_MapWidth, _MapHeight));
+				if (pix.y < _RowMin || pix.y > _RowMax)
+					discard;
+
+				float lon, lat;
+				if (unproject(rawLonAt(i.uv.x), rawLatAt(i.uv.y), lon, lat) < 0.5)
+					discard;
+
+				float rlat = lat * DEG2RAD;
+				float rlon = lon * DEG2RAD;
+				float sunSin = dot(float3(cos(rlat) * cos(rlon), sin(rlat), cos(rlat) * sin(rlon)), _SunDir.xyz);   // sine of the sun's elevation
+				float light = 1.0;
+				if (_EmissiveLightMode < -0.5)
+					light = saturate(-sunSin / 0.104528);   // sin 6 degrees
+				else if (_EmissiveLightMode > 0.5)
+					light = saturate(sunSin / 0.104528);
+				if (light <= 0.0)
+					discard;
+
+				// Visual's coverage, as pass 0 reads it: HiRes at full detail, LoRes in its 512 x 256 blocks
+				float ilon = fmod(floor(lon + 540.0), 360.0);
+				float ilat = fmod(floor(lat + 270.0), 180.0);
+				float cov = decodeCoverage(float2((ilon + 0.5) / 360.0, (ilat + 0.5) / 180.0));
+				float3 mUV = float3(0.0, 0.0, 0.0);
+				if (covHas(cov, 6.0))
+					mUV = mirageUV(lon, lat);
+				else if (covHas(cov, 2.0))
+				{
+					float fLat = saturate((lat + 90.0) / 180.0);
+					float fLon = (lon + 270.0) / 360.0;
+					if (fLon < 0.0) fLon += 1.0;
+					if (fLon > 1.0) fLon -= 1.0;
+					fLon = saturate(1.0 - fLon);
+					float2 q = float2(floor(fLon * 512.0) / 512.0, floor(fLat * 256.0) / 256.0);
+					mUV = mirageUV((1.0 - q.x) * 360.0 - 270.0, q.y * 180.0 - 90.0);
+				}
+				else
+					discard;
+
+				float3 rgb = mirageSample(_MirageDetailEmissive, _MirageEmissive, mUV).r * light * _EmissiveColor.rgb;
+				if (_ColorMode <= 0.5)
+					rgb = grayscale(rgb);
+				return fixed4(rgb, 0.0);
 			}
 			ENDCG
 		}

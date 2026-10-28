@@ -94,11 +94,15 @@ namespace SCANsat.SCAN_Map
 		}
 
 		// The layers an atlas holds, a plane each, the first deciding the slots: Visual's colour, then its
-		// normals unless the body has none the shader can read (BC5) and Visual is unshaded; or heights
+		// normals unless the body has none the shader can read (BC5) and Visual is unshaded, then its night
+		// lights where the body's own material draws them; or heights
 		class Layers
 		{
 			internal Layer[] planes;
 			internal bool heights;
+			internal int normalPlane = -1, lightPlane = -1;   // their planes; -1 for none
+			internal Color lightColor;   // the body material's _EmissiveColor
+			internal float lightMode;    // and _EmissiveLightMode: -1 at night, 0 always, 1 by day
 			internal Layer primary { get { return planes[0]; } }
 		}
 
@@ -127,7 +131,8 @@ namespace SCANsat.SCAN_Map
 		readonly object owner;   // a window's map
 		int boundFrame;
 		readonly int tileSize, border, slotSize, columns, atlasSize;
-		readonly Plane[] planes;   // colour, then normals if the body has them
+		readonly Plane[] planes;   // colour, then normals and night lights if the body has them (Layers)
+		readonly int normalPlane;   // -1: none
 		readonly Stopwatch clock = Stopwatch.StartNew();
 
 		readonly SlotState[] slotState;
@@ -143,6 +148,7 @@ namespace SCANsat.SCAN_Map
 		Color32[] indirectionPixels;
 		bool indirectionDirty;
 		byte[] flatNormal;   // a level BC5 slot, for a normal tile that will not read
+		byte[] darkSlot;     // an unlit slot, for a night-light tile that will not read
 
 		// Worker <-> main thread
 		readonly object gate = new object();
@@ -163,9 +169,10 @@ namespace SCANsat.SCAN_Map
 		/// tiles asked for are still to land, so the caller should composite again. wait: block until they
 		/// have (a one-off render).
 		/// </summary>
-		internal static bool Bind(Material m, CelestialBody body, int targetWidth, Window window, bool wait, out bool shaded, out bool loading)
+		internal static bool Bind(Material m, CelestialBody body, int targetWidth, Window window, bool wait, out bool shaded, out bool lights, out bool loading)
 		{
 			shaded = false;
+			lights = false;
 			loading = false;
 			if (!SCANmirage.TilesLoaded || body == null || failedBodies.Contains(body.name) || !measureBasis())
 			{
@@ -187,11 +194,25 @@ namespace SCANsat.SCAN_Map
 
 				plan(layers, neededLevel(targetWidth, layers), window, false, out int wholeLevel, out int detailLevel, out HashSet<int> detailTiles);
 				bindLayers(m, body, layers, wholeLevel, detailLevel, detailTiles, window, wait, out loading, out SCANmirageAtlas whole, out SCANmirageAtlas detail);
-				shaded = whole.planes.Length > 1;
-				m.SetTexture("_MirageNormals", shaded ? whole.planes[1].texture : null);
+				shaded = layers.normalPlane >= 0;
+				m.SetTexture("_MirageNormals", shaded ? whole.planes[layers.normalPlane].texture : null);
 				if (detail != null)
 				{
-					m.SetTexture("_MirageDetailNormals", shaded ? detail.planes[1].texture : null);
+					m.SetTexture("_MirageDetailNormals", shaded ? detail.planes[layers.normalPlane].texture : null);
+				}
+
+				// Night lights: the composite shader's pass 2, which SCANmap runs with the terminator on
+				lights = layers.lightPlane >= 0;
+				m.SetTexture("_MirageEmissive", lights ? whole.planes[layers.lightPlane].texture : null);
+				if (detail != null)
+				{
+					m.SetTexture("_MirageDetailEmissive", lights ? detail.planes[layers.lightPlane].texture : null);
+				}
+
+				if (lights)
+				{
+					m.SetColor("_EmissiveColor", layers.lightColor);
+					m.SetFloat("_EmissiveLightMode", layers.lightMode);
 				}
 
 				return true;
@@ -462,7 +483,71 @@ namespace SCANsat.SCAN_Map
 				normal = null;
 			}
 
-			return new Layers { planes = normal != null ? new[] { color, normal } : new[] { color } };
+			Layers layers = new Layers();
+			List<Layer> planes = new List<Layer> { color };
+			if (normal != null)
+			{
+				layers.normalPlane = planes.Count;
+				planes.Add(normal);
+			}
+
+			// Night lights where the body's own material draws Mirage's emissive layer (Sol's Earth and Io), in its
+			// tint and light mode. One channel, in the colour tiles' slots: so only at their layout and full depth,
+			// or the plane would hold every map at a shallower level than its colour has.
+			if (lightsDrawn(body, out layers.lightColor, out layers.lightMode))
+			{
+				Layer light = null;
+				try
+				{
+					light = probe(body, "Emissive", true);
+				}
+				catch (Exception e)
+				{
+					Log.Exception(e);
+				}
+
+				TextureFormat lf = light == null ? 0 : (TextureFormat)light.format;
+				if (light != null && ((lf != TextureFormat.BC4 && lf != TextureFormat.R8) || !SystemInfo.SupportsTextureFormat(lf)
+					|| light.tileSize != color.tileSize || light.border != color.border || light.maxLevel < color.maxLevel))
+				{
+					Log.Warning($"[{body.name}] Mirage emissive tiles are {lf}, {light.tileSize} px, to level {light.maxLevel} (colour {color.maxLevel}); no night lights");
+					light = null;
+				}
+
+				if (light != null)
+				{
+					layers.lightPlane = planes.Count;
+					planes.Add(light);
+					Log.Message($"[{body.name}] Mirage night lights: tint {layers.lightColor}, "
+						+ (layers.lightMode < -0.5f ? "at night" : layers.lightMode > 0.5f ? "by day" : "always"));
+				}
+			}
+
+			layers.planes = planes.ToArray();
+			return layers;
+		}
+
+		// Whether the body's own map-view material draws Mirage's emissive layer (Kopernicus's EMISSIVE_TEXTURES
+		// keyword, or Mirage's _HasEmissiveVT once it has bound the layer), and its tint and light mode there
+		static bool lightsDrawn(CelestialBody body, out Color color, out float mode)
+		{
+			color = Color.white;
+			mode = -1f;
+			Renderer r = body.scaledBody != null ? body.scaledBody.GetComponent<Renderer>() : null;
+			Material m = r != null ? r.sharedMaterial : null;
+			if (m == null || !m.HasProperty("_EmissiveColor")
+				|| !(m.IsKeywordEnabled("EMISSIVE_TEXTURES") || (m.HasProperty("_HasEmissiveVT") && m.GetFloat("_HasEmissiveVT") > 0.5f)))
+			{
+				return false;
+			}
+
+			color = m.GetColor("_EmissiveColor");
+			if (m.HasProperty("_EmissiveLightMode"))
+			{
+				mode = m.GetFloat("_EmissiveLightMode");
+			}
+
+			return true;
 		}
 
 		// Height tiles the shader can read: 16-bit fractions of the PQSMod's span, read texel by texel (the
@@ -584,6 +669,7 @@ namespace SCANsat.SCAN_Map
 			this.owner = owner;
 			window = owner != null;
 			heights = layers.heights;
+			normalPlane = layers.normalPlane;
 			tileSize = layers.primary.tileSize;
 			border = layers.primary.border;
 			slotSize = tileSize + 2 * border;
@@ -667,7 +753,7 @@ namespace SCANsat.SCAN_Map
 			}
 
 			Log.Message($"[{body.name}] Mirage {(heights ? "heights" : "Visual")}: {(window ? "window" : "whole body")} at level {level}, {slots} slots of {slotSize} px, "
-				+ $"{(heights ? "heights" : planes.Length > 1 ? "colour and normals" : "colour only")} ({atlasSize} px atlases, {bytes / 1048576.0:F1} MB)");
+				+ $"{string.Join(", ", Array.ConvertAll(planes, p => p.layer.name))} ({atlasSize} px atlases, {bytes / 1048576.0:F1} MB)");
 
 			if (window)
 			{
@@ -958,7 +1044,7 @@ namespace SCANsat.SCAN_Map
 							continue;
 						}
 
-						data = flatBC5(raw.Length);
+						data = i == normalPlane ? flatBC5(raw.Length) : dark(raw.Length);   // night lights: none
 					}
 
 					NativeArray<byte>.Copy(data, raw, raw.Length);
@@ -990,6 +1076,17 @@ namespace SCANsat.SCAN_Map
 		}
 
 		// A BC5 slot of level normals: every block's two channels at Mirage's flat value, 128
+		// A slot of zero bytes: black in BC4 and R8
+		byte[] dark(int length)
+		{
+			if (darkSlot == null || darkSlot.Length != length)
+			{
+				darkSlot = new byte[length];
+			}
+
+			return darkSlot;
+		}
+
 		byte[] flatBC5(int length)
 		{
 			if (flatNormal == null || flatNormal.Length != length)

@@ -541,6 +541,7 @@ namespace SCANsat.SCAN_Map
 		double sunLonCenter;
 		double sunLatCenter;
 		double gamma;
+		Vector4 sunDir;   // the subsolar point as a direction, for the night lights (composite shader pass 2)
 
 		internal void setSize(Vector2 size)
 		{
@@ -1083,6 +1084,9 @@ namespace SCANsat.SCAN_Map
 				}
 
 				gamma = Math.Abs(sunLatCenter) < 0.55 ? 100 : Math.Tan(Mathf.Deg2Rad * (90 - Math.Abs(sunLatCenter)));
+
+				double rlat = sunLat * Mathf.Deg2Rad, rlon = sunLon * Mathf.Deg2Rad;
+				sunDir = new Vector4((float)(Math.Cos(rlat) * Math.Cos(rlon)), (float)Math.Sin(rlat), (float)(Math.Cos(rlat) * Math.Sin(rlon)), 0f);
 			}
 
 			// mType is set (via MType or the resetMap(mode,...) overload) before every call
@@ -1277,7 +1281,7 @@ namespace SCANsat.SCAN_Map
 			// Only Visual draws from the body's own textures. Asked for in every mode, they cost a body with
 			// Parallax's scaled shader a reload of its textures on every composite of the pass: Parallax
 			// unloads an off-screen body's at once, ~200 ms a frame on Sol's Venus.
-			bool mirage = bindMirage(visualTargetWidth(), false, out bool mirageShaded, out bool mirageLoading);
+			bool mirage = bindMirage(visualTargetWidth(), false, out bool mirageShaded, out bool mirageLights, out bool mirageLoading);
 			if (!mirage && mType == mapType.Visual)
 			{
 				SCANcontroller.controller.getVisualSource(body, visualTargetWidth(), out colorTex, out normalTex, out normalYChannel, out gasRamp, out _);
@@ -1366,6 +1370,7 @@ namespace SCANsat.SCAN_Map
 			compositeMaterial.SetFloat("_SweepY", reveal);
 
 			Graphics.Blit(null, visualRenderTex, compositeMaterial, 0);   // pass 0 only: with no pass given Blit draws every pass, the height pass over the map
+			drawLights(visualRenderTex, mirageLights);
 
 			// That Blit was the fully revealed one (no redline). Mirage tiles still streaming in hold the pass
 			// open, so the pump composites again as they land.
@@ -1378,14 +1383,32 @@ namespace SCANsat.SCAN_Map
 		// A Mirage body's Visual map draws from the body's own colour tiles (SCANmirageAtlas): Mirage bodies
 		// ship no equirect colour map, and their ScaledSpace is Mirage's too. Binds them for a map needing
 		// targetWidth pixels across 360 degrees; false for any other body or mode. loading: some tiles are
-		// still to land. shaded: its normals are bound too. wait: block until they have (a one-off render).
-		private bool bindMirage(int targetWidth, bool wait, out bool shaded, out bool loading)
+		// still to land. shaded: its normals are bound too. lights: its night lights. wait: block until they
+		// have (a one-off render).
+		private bool bindMirage(int targetWidth, bool wait, out bool shaded, out bool lights, out bool loading)
 		{
-			shaded = loading = false;
+			shaded = lights = loading = false;
 			bool bound = mType == mapType.Visual && SCANmirage.IsMirageBody(body)
-				&& SCANmirageAtlas.Bind(compositeMaterial, body, targetWidth, mirageWindowFor(), wait, out shaded, out loading);
+				&& SCANmirageAtlas.Bind(compositeMaterial, body, targetWidth, mirageWindowFor(), wait, out shaded, out lights, out loading);
 			compositeMaterial.SetFloat("_MirageColor", bound ? 1f : 0f);
 			return bound;
+		}
+
+		// The harness turns them off to hold a map with them against one without
+		internal static bool LightsAllowed = true;
+
+		// A Mirage body's night lights over its Visual map, just drawn into target by pass 0: the composite
+		// shader's pass 2 adds them, with the terminator on, lit as the body's own material lights them (night
+		// only for Earth, always for Io's lava). A shader bundle from before the pass has two.
+		private void drawLights(RenderTexture target, bool lights)
+		{
+			if (!lights || !LightsAllowed || !terminator || mType != mapType.Visual || profile.PlanetUV || compositeMaterial.passCount < 3)
+			{
+				return;
+			}
+
+			compositeMaterial.SetVector("_SunDir", sunDir);
+			Graphics.Blit(null, target, compositeMaterial, 2);
 		}
 
 		// The ground a window map shows, for the Mirage atlas to fetch the tiles under it at the map's scale:
@@ -1639,8 +1662,8 @@ namespace SCANsat.SCAN_Map
 
 			Texture colorTex = null, normalTex = null, gasRamp = null;
 			int normalYChannel = 0;
-			bool mirageShaded = false;
-			if (!bindMirage(sourceWidth, true, out mirageShaded, out _)
+			bool mirageShaded = false, mirageLights = false;
+			if (!bindMirage(sourceWidth, true, out mirageShaded, out mirageLights, out _)
 				&& !SCANcontroller.controller.getVisualSource(body, sourceWidth, out colorTex, out normalTex, out normalYChannel, out gasRamp, out _))
 			{
 				return null;
@@ -1662,6 +1685,7 @@ namespace SCANsat.SCAN_Map
 			setFramingUniforms(w, h, mapscale * k);
 
 			Graphics.Blit(null, rt, compositeMaterial, 0);
+			drawLights(rt, mirageLights);
 
 			SCANUtil.SCANlog("[{0}] Visual export rendered at {1}x{2} (on-screen {3}x{4})", body.bodyName, w, h, mapwidth, mapheight);
 			return rt;

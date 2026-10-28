@@ -17,6 +17,7 @@
 * Building maps no longer upload their whole data textures every frame: the big map's Altimetry and Biome frames came to 10-17 ms on the 4 ms budget
 * Right-clicking the main map opens the zoom map on that spot, as on the big map
 * A zoom map locked to the vessel follows it every second in flight, instead of only when the auto-refresh fires
+* Night lights on Mirage bodies: with the terminator on, Visual maps of Earth and Io show Mirage's emissive layer in the tint and light mode of the body's own material - Earth's cities at night, fading in over civil twilight, Io's lava always. Where Visual is scanned, at the detail its coverage gives; in the PNG export too
 
 ## 22.1 - 2026/10/12
 
