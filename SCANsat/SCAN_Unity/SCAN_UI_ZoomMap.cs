@@ -1094,7 +1094,11 @@ namespace SCANsat.SCAN_Unity
 		{
 			SCANcontroller.controller.zoomMapType = map.MType.ToString();
 			SCANcontroller.controller.zoomMapColor = map.ColorMap;
-			SCANcontroller.controller.zoomMapResource = map.Resource.Name;
+			// A map has no resource when no resource is defined: keep the zoom map's own
+			if (map.Resource != null)
+			{
+				SCANcontroller.controller.zoomMapResource = map.Resource.Name;
+			}
 			SCANcontroller.controller.zoomMapResourceOn = map.ResourceActive;
 
 			initializeMapCenter(SCANUtil.fixLatShift(lat), SCANUtil.fixLonShift(lon), map.Body);
