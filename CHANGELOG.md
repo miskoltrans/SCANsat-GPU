@@ -4,7 +4,7 @@
 
 * Mirage support (ballisticfox's terrain and virtual-texture mod for Sol). Mirage is optional: SCANsat looks for it at runtime, and without it every body is mapped as before. If a Mirage update changes what SCANsat calls, SCANsat logs an error and falls back to the body's other sources
 * Altimetry and Slope work on Mirage bodies, which drew blank before (their PQS reports a flat height range). Heights come straight from Mirage's height tiles at the level that matches the map's pixel size, so they match the rendered terrain, and maps drawn under time warp are no coarser than at 1x. The terrain colour range defaults to the body's range from its coarsest tiles
-* Visual maps of Mirage bodies are drawn on the GPU from Mirage's colour tiles, shaded by its normal tiles. The tiles are read on a worker thread; the coarsest level stands in until they land
+* Visual maps of Mirage bodies are drawn on the GPU from Mirage's colour tiles, shaded by its normal tiles. The tiles are read on a worker thread; the coarsest level stands in until they land. That includes Jupiter and Saturn, which have Mirage colour tiles but no Mirage terrain: they were drawn in green stripes, from a texture of Mirage's gas giant shader that is not their colour. Their maps show the cloud bands as Mirage stores them; in game Mirage turns each band at its own speed
 * Zoom maps and RPM screens fetch the tiles under their window at their own level, down to the deepest level installed, so zooming in sharpens the Visual map instead of magnifying one level
 * The Visual PNG export of a Mirage body waits for the deeper tiles its width needs
 * Mirage tiles are released when leaving the scene
@@ -18,6 +18,8 @@
 * Right-clicking the main map opens the zoom map on that spot, as on the big map; so does a new zoom button in the map's top-right corner (click it, then the spot), whose tooltip tells of the right click
 * A zoom map locked to the vessel follows it in flight as fast as it can be rebuilt - every few frames for a Mirage body's Visual map, a few times a second for its Altimetry and Biome - instead of only when the auto-refresh fires, building at most half the time. While it follows, its colour range only widens, so a height keeps its colour
 * Night lights on Mirage bodies: with the terminator on, Visual maps of Earth and Io show Mirage's emissive layer in the tint and light mode of the body's own material - Earth's cities at night, fading in over civil twilight, Io's lava always. Where Visual is scanned, at the detail its coverage gives; in the PNG export too
+* Fixed the zoom map and RPM throwing an error every frame in Altimetry on a body with no terrain (the Sun, gas giants): with nothing to fit their colour range to, they divided by an empty one. They use the body's configured range, the one the legend shows
+* A missing path in a SCANSAT\_BODY\_TEXTURES cfg is warned about once a session, not each time one of the body's maps opens
 
 ## 22.1 - 2026/10/12
 
