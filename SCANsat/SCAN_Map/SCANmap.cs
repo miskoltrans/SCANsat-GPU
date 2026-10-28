@@ -1913,13 +1913,17 @@ namespace SCANsat.SCAN_Map
 			// TextureFormat.RFloat is one float per pixel, so this view is exactly mapwidth * mapheight
 			// long. global:: because this namespace is SCANsat.SCAN_Map, where a bare "Unity" binds to
 			// SCANsat.Unity rather than to UnityEngine's Unity.Collections.
+			// Cleared a block at a time: a million single writes through the NativeArray indexer were most of a new
+			// big map's first build frame (14-17 ms)
 			global::Unity.Collections.NativeArray<float> raw = tex.GetRawTextureData<float>();
-			for (int i = 0; i < raw.Length; i++)
+			for (int i = 0; i < raw.Length; i += zeroBlock.Length)
 			{
-				raw[i] = 0f;
+				global::Unity.Collections.NativeArray<float>.Copy(zeroBlock, 0, raw, i, Math.Min(zeroBlock.Length, raw.Length - i));
 			}
 			tex.Apply(false);
 		}
+
+		private static readonly float[] zeroBlock = new float[4096];
 
 		/// <summary>
 		/// One data texture's rows on their way to the GPU. Texture2D.Apply re-uploads the whole texture - 4 MB
@@ -2425,17 +2429,40 @@ namespace SCANsat.SCAN_Map
 			CBAttributeMapSO.MapAttribute[] atts = body.BiomeMap.Attributes;
 			CBAttributeMapSO.MapAttribute[] pal = SCANUtil.GetOrBuildPalette(body);
 			bool[] seen = new bool[atts.Length];
-			bool anyRow = false;
-
 			int width = biome_indexmap.GetLength(0), height = biome_indexmap.GetLength(1);
-			for (int y = 0; y < height && y < biomeRowCached.Length; y++)
+
+			if (Array.IndexOf(biomeRowCached, true) < 0)
+			{
+				return null;
+			}
+
+			// Biome coverage per 1-degree cell, read once (SCANUtil.isCovered per pixel, through its delegates, took
+			// 12-21 ms on a big map): the test per pixel is then an array read, with isCovered's cell indexing
+			bool[] covered = new bool[360 * 180];
+			int coveredCells = 0;
+			Int16[,] cov = data.Coverage;
+			for (int i = 0; i < 360; i++)
+			{
+				for (int j = 0; j < 180; j++)
+				{
+					if ((cov[i, j] & (Int16)SCANtype.Biome) != 0)
+					{
+						covered[i * 180 + j] = true;
+						coveredCells++;
+					}
+				}
+			}
+
+			bool everywhere = coveredCells == covered.Length;
+			int found = 0;
+
+			for (int y = 0; y < height && y < biomeRowCached.Length && coveredCells > 0 && found < atts.Length; y++)
 			{
 				if (!biomeRowCached[y])
 				{
 					continue;
 				}
 
-				anyRow = true;
 				double rawLat = (y * 1.0f / mapscale) - 90f + lat_offset;   // a geographic cache's grid, as prepRow samples it
 
 				for (int x = 0; x < width; x++)
@@ -2447,26 +2474,28 @@ namespace SCANsat.SCAN_Map
 						continue;
 					}
 
-					double lon, lat = rawLat;
-					if (profile.GeographicCache)
+					if (!everywhere)
 					{
-						lon = (x * 1.0f / mapscale) - 180f + lon_offset;
-					}
-					else if (!pixelLonLat(x, y, out lon, out lat))
-					{
-						continue;
+						double lon, lat = rawLat;
+						if (profile.GeographicCache)
+						{
+							lon = (x * 1.0f / mapscale) - 180f + lon_offset;
+						}
+						else if (!pixelLonLat(x, y, out lon, out lat))
+						{
+							continue;
+						}
+
+						int ilon = ((int)(lon + 360 + 180)) % 360, ilat = ((int)(lat + 180 + 90)) % 180;
+						if (ilon < 0 || ilat < 0 || !covered[ilon * 180 + ilat])
+						{
+							continue;
+						}
 					}
 
-					if (SCANUtil.isCovered(lon, lat, data, SCANtype.Biome))
-					{
-						seen[idx] = true;
-					}
+					seen[idx] = true;
+					found++;
 				}
-			}
-
-			if (!anyRow)
-			{
-				return null;
 			}
 
 			List<CBAttributeMapSO.MapAttribute> list = new List<CBAttributeMapSO.MapAttribute>();
