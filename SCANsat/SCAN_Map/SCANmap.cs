@@ -932,9 +932,10 @@ namespace SCANsat.SCAN_Map
 		private int rangeRow = -1;           // autoRange pre-pass cursor: -1 not started, >= mapheight done
 		private int rangeCol;                // ... and its column within rangeRow
 		private int rowCol;                  // prepRow's column within row mapstep
-		// Pixels a building map always gets each frame, however far over the budget: progress without a long
-		// frame. A whole row was the floor, and a row of PQS samples on an RSS-scale body is ~200 ms.
-		private const int MinColumnsPerFrame = 16;
+		// Time a building map always gets each frame, however much of the shared budget the builders before it
+		// spent: every map makes progress, none waits for the others to finish, and none makes a long frame.
+		// A whole row was the floor, tens of milliseconds where PQS is slow.
+		private const double MinSliceMs = 0.5;
 		private float rangeMin, rangeMax;
 		private int rangeSamples;
 
@@ -2220,7 +2221,7 @@ namespace SCANsat.SCAN_Map
 			{
 				for (int done = 0; rangeCol < mapwidth; rangeCol += 4, done++)
 				{
-					if (done >= MinColumnsPerFrame && System.Diagnostics.Stopwatch.GetTimestamp() - start >= budget)
+					if (done > 0 && System.Diagnostics.Stopwatch.GetTimestamp() - start >= budget)
 					{
 						return false;
 					}
@@ -2465,7 +2466,7 @@ namespace SCANsat.SCAN_Map
 
 			for (int done = 0; rowCol < mapwidth; rowCol++, done++)
 			{
-				if (done >= MinColumnsPerFrame && System.Diagnostics.Stopwatch.GetTimestamp() - start >= budget)
+				if (done > 0 && System.Diagnostics.Stopwatch.GetTimestamp() - start >= budget)
 				{
 					return false;
 				}
@@ -2867,7 +2868,7 @@ namespace SCANsat.SCAN_Map
 		private bool buildSlice()
 		{
 			long start = System.Diagnostics.Stopwatch.GetTimestamp();
-			long budget = claimBuildBudget();
+			long budget = Math.Max(claimBuildBudget(), (long)(MinSliceMs * System.Diagnostics.Stopwatch.Frequency / 1000.0));
 			bool elevDirty = false, biomeDirty = false;
 
 			if (biomeRowCached == null || biomeRowCached.Length != mapheight)
@@ -2920,8 +2921,8 @@ namespace SCANsat.SCAN_Map
 				}
 			}
 
-			// At least MinColumnsPerFrame pixels per frame, then as many as fit the budget; a row the budget
-			// cuts short goes on next frame. Row mapstep is staged once it is all sampled; the shader reads
+			// At least MinSliceMs of pixels per frame, then as many as fit the budget; a row the budget cuts
+			// short goes on next frame. Row mapstep is staged once it is all sampled; the shader reads
 			// neighbouring rows itself.
 			while (mapstep < mapheight)
 			{
